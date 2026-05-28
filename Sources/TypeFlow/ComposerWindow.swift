@@ -98,12 +98,20 @@ final class ComposerWindow: NSWindow {
         textView.insertionPointColor = .controlAccentColor
         textView.textContainerInset = NSSize(width: 4, height: 8)
 
-        // The whole point of TypeFlow — full Apple text intelligence.
+        // Apple text intelligence — only the features that work reliably
+        // inside this borderless window today.
         //
-        // Note: isAutomaticTextCompletionEnabled = true gives the old-style
-        // popup completion bubble, and it suppresses inline predictive text.
-        // We want the Safari/ChatGPT-style inline gray ghost prediction
-        // instead, so we explicitly turn the popup off and request inline.
+        // smartInsertDeleteEnabled is OFF: when autocorrect has many active
+        // suggestions on a long buffer, smart-delete walks through dismissing
+        // them one by one before deleting characters, which feels like
+        // Backspace is broken. Plain delete behaves predictably.
+        //
+        // inlinePredictionType is .disabled (not .default): leaving it on
+        // .default puts the text view into a partial-prediction state
+        // machine even when no ghost text appears, and that state machine
+        // intercepts Delete. We'll re-enable once we've solved the visible-
+        // ghost-text issue properly (currently tracked: the borderless
+        // window class seems to block the prediction service from attaching).
         textView.isAutomaticSpellingCorrectionEnabled = true
         textView.isAutomaticTextReplacementEnabled = true
         textView.isAutomaticQuoteSubstitutionEnabled = true
@@ -113,17 +121,15 @@ final class ComposerWindow: NSWindow {
         textView.isGrammarCheckingEnabled = true
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
-        textView.smartInsertDeleteEnabled = true
+        textView.smartInsertDeleteEnabled = false
         textView.usesFindBar = false
         textView.usesInspectorBar = false
 
-        // Inline predictive text (macOS 14.4+) — the Safari/ChatGPT ghost
-        // text. `.default` means "follow the system setting in
-        // System Settings → Keyboard → Text Input → Show inline predictive text".
         if #available(macOS 14.4, *) {
-            textView.inlinePredictionType = .default
+            // rawValue 2 = disabled in NSTextInputTraitType
+            // (the Swift name varies across SDKs; raw value is stable)
+            textView.inlinePredictionType = NSTextInputTraitType(rawValue: 2) ?? .default
         }
-        // Writing Tools (macOS 15+) — selection-based AI rewriting.
         if #available(macOS 15.0, *) {
             textView.writingToolsBehavior = .complete
         }
