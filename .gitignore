@@ -1,0 +1,18 @@
+## Swift / SPM
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+## macOS
+.DS_Store
+*.swp
+
+## Personal / workspace
+.env
+.env.local
+.envrc
+.claude/
+.mcp.json
