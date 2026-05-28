@@ -25,6 +25,11 @@ final class ProcessWatcher {
     private let queue = DispatchQueue(label: "typeflow.processwatcher")
     var onChange: (([ClaudeSession]) -> Void)?
 
+    /// Manual override: when set and still alive, this pid wins over the
+    /// most-recently-started heuristic. Cleared automatically when the
+    /// selected session disappears.
+    var preferredPID: pid_t?
+
     /// Set TYPEFLOW_DEBUG=1 in the environment to see watcher diagnostics on stderr.
     private static let debug: Bool = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
 
@@ -41,16 +46,24 @@ final class ProcessWatcher {
         timer = nil
     }
 
-    /// v1 routing: most recently started `claude` process.
-    /// TODO: replace with AX-based frontmost-Warp-window → child-PID mapping.
+    /// Routing precedence:
+    ///   1. The user's explicit pick (preferredPID), if still alive.
+    ///   2. The most recently started session.
     func target() -> ClaudeSession? {
-        sessions.max(by: { $0.startTime < $1.startTime })
+        if let pid = preferredPID, let s = sessions.first(where: { $0.pid == pid }) {
+            return s
+        }
+        return sessions.max(by: { $0.startTime < $1.startTime })
     }
 
     private func refresh() {
         let current = Self.findClaudeProcesses()
         if current != sessions {
             sessions = current
+            // Drop a stale manual pick if the underlying session is gone.
+            if let pid = preferredPID, !current.contains(where: { $0.pid == pid }) {
+                preferredPID = nil
+            }
             if Self.debug {
                 fputs("TypeFlow: detected \(current.count) claude session(s): \(current)\n", stderr)
             }

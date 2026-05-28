@@ -2,14 +2,13 @@ import AppKit
 
 final class ComposerWindow: NSWindow {
     let textView = NSTextView()
-    private let statusLabel = NSTextField(labelWithString: "")
+    private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
     private var onSubmit: ((String) -> Void)?
     private let textDelegate = ComposerTextDelegate()
 
-    var targetDescription: String = "no Claude Code session" {
-        didSet { statusLabel.stringValue = "→ " + targetDescription }
-    }
+    /// Called when the user picks a session from the footer dropdown.
+    var onSessionSelected: ((pid_t) -> Void)?
 
     init(onSubmit: @escaping (String) -> Void) {
         self.onSubmit = onSubmit
@@ -162,16 +161,25 @@ final class ComposerWindow: NSWindow {
         let footer = NSView()
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.stringValue = "→ no Claude Code session"
+        sessionPicker.translatesAutoresizingMaskIntoConstraints = false
+        sessionPicker.isBordered = false
+        sessionPicker.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        sessionPicker.controlSize = .small
+        sessionPicker.target = self
+        sessionPicker.action = #selector(sessionPickerChanged(_:))
+        if let cell = sessionPicker.cell as? NSPopUpButtonCell {
+            cell.arrowPosition = .arrowAtBottom
+            cell.bezelStyle = .accessoryBarAction
+        }
+        // Seed with the empty state — App will repopulate via setSessions.
+        sessionPicker.addItem(withTitle: "→ no Claude Code session")
+        sessionPicker.isEnabled = false
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
 
-        footer.addSubview(statusLabel)
+        footer.addSubview(sessionPicker)
         footer.addSubview(hintLabel)
 
         let separator = NSBox()
@@ -218,8 +226,8 @@ final class ComposerWindow: NSWindow {
             footer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
             footer.heightAnchor.constraint(equalToConstant: 18),
 
-            statusLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
-            statusLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionPicker.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: -6),
+            sessionPicker.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             hintLabel.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             hintLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
         ])
@@ -255,6 +263,38 @@ final class ComposerWindow: NSWindow {
 
     func clear() {
         textView.string = ""
+    }
+
+    /// Populates the footer dropdown with the live session list and selects
+    /// whichever session the watcher's target() chose. The user can override
+    /// by picking another item.
+    func setSessions(_ sessions: [ClaudeSession], targetPID: pid_t?) {
+        sessionPicker.removeAllItems()
+        guard !sessions.isEmpty else {
+            sessionPicker.addItem(withTitle: "→ no Claude Code session")
+            sessionPicker.isEnabled = false
+            return
+        }
+        sessionPicker.isEnabled = true
+        // Sort newest-first so the implicit target sits at the top.
+        let sorted = sessions.sorted(by: { $0.startTime > $1.startTime })
+        for session in sorted {
+            let title = "→ claude (\(session.shortLabel))"
+            sessionPicker.addItem(withTitle: title)
+            sessionPicker.lastItem?.representedObject = NSNumber(value: session.pid)
+        }
+        if let pid = targetPID,
+           let item = sessionPicker.itemArray.first(where: {
+               ($0.representedObject as? NSNumber)?.int32Value == pid
+           }) {
+            sessionPicker.select(item)
+        }
+    }
+
+    @objc private func sessionPickerChanged(_ sender: NSPopUpButton) {
+        guard let pidNumber = sender.selectedItem?.representedObject as? NSNumber
+        else { return }
+        onSessionSelected?(pid_t(pidNumber.int32Value))
     }
 
     // MARK: - Keyboard

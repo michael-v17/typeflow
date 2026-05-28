@@ -23,6 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         composer = ComposerWindow { [weak self] text in
             self?.sendToClaude(text)
         }
+        composer.onSessionSelected = { [weak self] pid in
+            self?.watcher.preferredPID = pid
+            self?.refreshStatus(sessions: self?.watcher.sessions ?? [])
+        }
 
         watcher = ProcessWatcher()
         watcher.onChange = { [weak self] sessions in
@@ -109,11 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatus(sessions: [ClaudeSession]) {
-        if let target = watcher.target() {
-            composer.targetDescription = "claude (\(target.shortLabel))"
-        } else {
-            composer.targetDescription = "no Claude Code session"
-        }
+        composer.setSessions(sessions, targetPID: watcher.target()?.pid)
         if let button = statusItem?.button {
             button.toolTip = sessions.isEmpty
                 ? "TypeFlow — no Claude Code session"
