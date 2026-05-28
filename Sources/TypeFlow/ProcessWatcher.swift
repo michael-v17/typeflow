@@ -13,6 +13,9 @@ final class ProcessWatcher {
     private let queue = DispatchQueue(label: "typeflow.processwatcher")
     var onChange: (([ClaudeSession]) -> Void)?
 
+    /// Set TYPEFLOW_DEBUG=1 in the environment to see watcher diagnostics on stderr.
+    private static let debug: Bool = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
+
     func start(interval: TimeInterval = 0.5) {
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: interval)
@@ -36,6 +39,9 @@ final class ProcessWatcher {
         let current = Self.findClaudeProcesses()
         if current != sessions {
             sessions = current
+            if Self.debug {
+                fputs("TypeFlow: detected \(current.count) claude session(s): \(current)\n", stderr)
+            }
             let snapshot = current
             DispatchQueue.main.async { [weak self] in
                 self?.onChange?(snapshot)
@@ -46,57 +52,80 @@ final class ProcessWatcher {
     // MARK: - libproc lookup
 
     private static func findClaudeProcesses() -> [ClaudeSession] {
-        let needed = proc_listallpids(nil, 0)
-        guard needed > 0 else { return [] }
+        // First call with nil buffer to find required size.
+        let needed = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard needed > 0 else {
+            if debug { fputs("TypeFlow: proc_listpids returned \(needed)\n", stderr) }
+            return []
+        }
 
-        let capacity = Int(needed) + 64
+        let capacity = Int(needed) / MemoryLayout<pid_t>.size + 64
         var pids = [pid_t](repeating: 0, count: capacity)
-        let bytes = proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.size))
-        guard bytes > 0 else { return [] }
+        let bytes = pids.withUnsafeMutableBufferPointer { buf -> Int32 in
+            proc_listpids(UInt32(PROC_ALL_PIDS), 0,
+                          buf.baseAddress, Int32(capacity * MemoryLayout<pid_t>.size))
+        }
+        guard bytes > 0 else {
+            if debug { fputs("TypeFlow: proc_listpids (fill) returned \(bytes)\n", stderr) }
+            return []
+        }
         let count = Int(bytes) / MemoryLayout<pid_t>.size
 
         var found: [ClaudeSession] = []
         for i in 0..<count {
             let pid = pids[i]
             guard pid > 0 else { continue }
-            guard let name = processName(pid: pid), name == "claude" else { continue }
-            guard let tty = ttyPath(pid: pid) else { continue }
-            let start = startTime(pid: pid) ?? 0
+            guard let path = executablePath(pid: pid) else { continue }
+            guard isClaudeBinary(path: path) else { continue }
+            guard let bsd = bsdInfo(pid: pid) else {
+                if debug { fputs("TypeFlow: pid \(pid) (\(path)) — no bsdinfo\n", stderr) }
+                continue
+            }
+            guard let tty = ttyPath(from: bsd) else {
+                if debug {
+                    fputs("TypeFlow: pid \(pid) (\(path)) — no tty (e_tdev=\(bsd.e_tdev))\n", stderr)
+                }
+                continue
+            }
+            let start = TimeInterval(bsd.pbi_start_tvsec)
+                      + TimeInterval(bsd.pbi_start_tvusec) / 1_000_000
             found.append(ClaudeSession(pid: pid, ttyPath: tty, startTime: start))
         }
         return found
     }
 
-    private static func processName(pid: pid_t) -> String? {
-        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        let n = proc_name(pid, &buf, UInt32(buf.count))
+    private static func executablePath(pid: pid_t) -> String? {
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let n = proc_pidpath(pid, &buf, UInt32(buf.count))
         guard n > 0 else { return nil }
         return String(cString: buf)
     }
 
-    private static func ttyPath(pid: pid_t) -> String? {
+    /// Recognize the Claude Code CLI across installer variants:
+    ///   - Native installer: ~/.local/share/claude/versions/X.Y.Z
+    ///   - npm / homebrew / direct: a binary literally named "claude"
+    private static func isClaudeBinary(path: String) -> Bool {
+        if path.contains("/share/claude/versions/") { return true }
+        return (path as NSString).lastPathComponent == "claude"
+    }
+
+    private static func bsdInfo(pid: pid_t) -> proc_bsdinfo? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         let n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
         guard n == size else { return nil }
+        return info
+    }
 
-        let dev = info.e_tdev
-        guard dev != UInt32.max, dev != 0 else { return nil }
-
-        // devname() resolves dev_t back to a path like "ttys003"
-        guard let cstr = devname_r(dev_t(dev), S_IFCHR, nil, 0) ?? devname(dev_t(dev), S_IFCHR) else {
+    private static func ttyPath(from info: proc_bsdinfo) -> String? {
+        let raw = info.e_tdev
+        guard raw != UInt32.max, raw != 0 else { return nil }
+        // devname() returns a static buffer string like "ttys003" for the dev_t.
+        guard let cstr = devname(dev_t(bitPattern: UInt32(raw)), S_IFCHR) else {
             return nil
         }
         let name = String(cString: cstr)
         guard !name.isEmpty, name != "??" else { return nil }
         return "/dev/" + name
-    }
-
-    private static func startTime(pid: pid_t) -> TimeInterval? {
-        var info = proc_bsdinfo()
-        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-        let n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
-        guard n == size else { return nil }
-        return TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000
     }
 }

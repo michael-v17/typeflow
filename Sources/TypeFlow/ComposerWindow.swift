@@ -62,7 +62,10 @@ final class ComposerWindow: NSPanel {
             blur.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor),
         ])
 
-        // Text view
+        // ScrollView uses autolayout; its documentView (textView) must use
+        // frame-based layout + autoresizingMask. Don't disable
+        // translatesAutoresizingMaskIntoConstraints on the textView or its
+        // frame collapses to zero and typed text becomes invisible.
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.drawsBackground = false
@@ -70,7 +73,20 @@ final class ComposerWindow: NSPanel {
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
 
-        textView.translatesAutoresizingMaskIntoConstraints = false
+        let initialSize = NSSize(width: 600, height: 140)
+        textView.frame = NSRect(origin: .zero, size: initialSize)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                   height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: initialSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = true
+
         textView.isEditable = true
         textView.isSelectable = true
         textView.isRichText = false
