@@ -101,12 +101,17 @@ final class ComposerWindow: NSPanel {
         textView.insertionPointColor = .controlAccentColor
         textView.textContainerInset = NSSize(width: 4, height: 8)
 
-        // The whole point of TypeFlow — full Apple text intelligence
+        // The whole point of TypeFlow — full Apple text intelligence.
+        //
+        // Note: isAutomaticTextCompletionEnabled = true gives the old-style
+        // popup completion bubble, and it suppresses inline predictive text.
+        // We want the Safari/ChatGPT-style inline gray ghost prediction
+        // instead, so we explicitly turn the popup off and request inline.
         textView.isAutomaticSpellingCorrectionEnabled = true
         textView.isAutomaticTextReplacementEnabled = true
         textView.isAutomaticQuoteSubstitutionEnabled = true
         textView.isAutomaticDashSubstitutionEnabled = true
-        textView.isAutomaticTextCompletionEnabled = true
+        textView.isAutomaticTextCompletionEnabled = false
         textView.isContinuousSpellCheckingEnabled = true
         textView.isGrammarCheckingEnabled = true
         textView.isAutomaticLinkDetectionEnabled = false
@@ -114,6 +119,17 @@ final class ComposerWindow: NSPanel {
         textView.smartInsertDeleteEnabled = true
         textView.usesFindBar = false
         textView.usesInspectorBar = false
+
+        // Inline predictive text (macOS 14.4+) — the Safari/ChatGPT ghost
+        // text. `.default` means "follow the system setting in
+        // System Settings → Keyboard → Text Input → Show inline predictive text".
+        if #available(macOS 14.4, *) {
+            textView.inlinePredictionType = .default
+        }
+        // Writing Tools (macOS 15+) — selection-based AI rewriting.
+        if #available(macOS 15.0, *) {
+            textView.writingToolsBehavior = .complete
+        }
 
         scroll.documentView = textView
 
