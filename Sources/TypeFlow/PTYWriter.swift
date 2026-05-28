@@ -7,19 +7,27 @@ enum PTYWriter {
         case writeFailed(errno: Int32)
     }
 
-    /// Default chunk and inter-chunk delay tuned for claude (Ink-based REPL):
-    ///   - Plain blast write on long text: claude drops characters / wraps oddly.
-    ///   - Bracketed paste markers (ESC[200~ ... ESC[201~): claude swallows the
-    ///     trailing \r inside paste mode, so the prompt never submits.
-    ///   - Chunked writes with small gaps: claude processes each chunk as
-    ///     normal typed input; Enter at the end is a real keystroke that
-    ///     submits, and Backspace inside claude works on the resulting text.
-    static let chunkSize = 32
-    static let interChunkMicros: UInt32 = 8_000   // 8ms
-    static let preSubmitMicros: UInt32 = 50_000   // 50ms before the final \r
+    /// Payloads up to this many bytes go in a single atomic write — best
+    /// behavior with claude's Ink input. Beyond it we chunk to avoid
+    /// PTY-buffer truncation, but keep the chunks large enough that the
+    /// trailing LF still arrives in the same write as preceding text.
+    private static let singleWriteThreshold = 2048
+    private static let chunkSize = 1024
+    private static let interChunkMicros: UInt32 = 8_000
 
-    /// Writes `text` to the target tty as if typed, then sends Enter to submit.
-    /// Multi-line input is normalised to `\n`; the final submission uses `\r`.
+    /// Writes `text` to the tty followed by LF to submit.
+    ///
+    /// Two requirements that took some discovery:
+    ///   1. The submit byte must be LF (0x0A), not CR (0x0D). CR is
+    ///      interpreted by the terminal renderer as cursor-to-column-0
+    ///      before claude's input handler sees it, so the prompt never
+    ///      submits and the caret jumps home.
+    ///   2. The LF must arrive in the SAME write() call as the trailing
+    ///      bytes of the text. A standalone LF write after the text is
+    ///      treated by claude as a stray newline after input has already
+    ///      been finalized, leaving the buffer in a half-state where the
+    ///      next keystroke wipes it. Inlining the LF in the final chunk
+    ///      makes the submit byte part of the same input event.
     static func send(_ text: String, to ttyPath: String) throws {
         let fd = open(ttyPath, O_WRONLY | O_NOCTTY)
         guard fd >= 0 else {
@@ -29,19 +37,14 @@ enum PTYWriter {
 
         let normalised = text.replacingOccurrences(of: "\r\n", with: "\n")
                              .replacingOccurrences(of: "\r", with: "\n")
-        let bytes = Array(normalised.utf8)
+        var bytes = Array(normalised.utf8)
+        bytes.append(0x0A)
 
-        try writeChunked(bytes, fd: fd)
-
-        // Small pause so claude finishes redrawing its input buffer before
-        // the Enter keystroke lands.
-        if !bytes.isEmpty { usleep(preSubmitMicros) }
-
-        // 0x0A (LF) — not 0x0D (CR). When written from outside the terminal,
-        // CR is processed by the renderer as "cursor-to-column-0" before
-        // claude's Ink-based input handler sees it, leaving the text in the
-        // buffer with the caret jumped home. LF reliably triggers submit.
-        try writeRaw([0x0A], fd: fd)
+        if bytes.count <= singleWriteThreshold {
+            try writeRaw(bytes, fd: fd)
+        } else {
+            try writeChunked(bytes, fd: fd)
+        }
     }
 
     private static func writeChunked(_ bytes: [UInt8], fd: Int32) throws {
