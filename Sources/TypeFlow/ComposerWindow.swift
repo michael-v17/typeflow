@@ -31,16 +31,11 @@ final class ComposerWindow: NSWindow {
     }
 
     private func hideTitleBarChrome() {
-        // Keep the close (red) traffic-light visible — the user needs a
-        // discoverable way to dismiss the composer beyond ⎋ / ⌥Space.
-        // Route its click to hide() so the window survives for the next
-        // toggle instead of being closed (which would tear down the
-        // text view and lose autocorrect state).
-        if let closeButton = standardWindowButton(.closeButton) {
-            closeButton.isHidden = false
-            closeButton.target = self
-            closeButton.action = #selector(closeButtonClicked)
-        }
+        // Hide all native traffic-lights. The standard close button is
+        // rendered at window-origin (0,0) but is clipped by our 16pt
+        // rounded-corner mask, so clicks don't land on it reliably.
+        // We add a custom × button to the blur view's top-right instead.
+        standardWindowButton(.closeButton)?.isHidden = true
         standardWindowButton(.miniaturizeButton)?.isHidden = true
         standardWindowButton(.zoomButton)?.isHidden = true
     }
@@ -160,6 +155,7 @@ final class ComposerWindow: NSWindow {
 
         scroll.documentView = textView
         textDelegate.onSubmit = { [weak self] in self?.submit() }
+        textDelegate.onCancel = { [weak self] in self?.hide() }
         textView.delegate = textDelegate
 
         // Footer
@@ -186,6 +182,25 @@ final class ComposerWindow: NSWindow {
         container.addSubview(scroll)
         container.addSubview(separator)
         container.addSubview(footer)
+
+        // Custom × close button in top-right corner
+        let closeButton = NSButton(title: "", target: self,
+                                   action: #selector(closeButtonClicked))
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.bezelStyle = .accessoryBarAction
+        closeButton.isBordered = false
+        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill",
+                                    accessibilityDescription: "Close")
+        closeButton.contentTintColor = NSColor.tertiaryLabelColor
+        closeButton.imagePosition = .imageOnly
+        closeButton.toolTip = "Close (Esc)"
+        container.addSubview(closeButton)
+        NSLayoutConstraint.activate([
+            closeButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            closeButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            closeButton.widthAnchor.constraint(equalToConstant: 18),
+            closeButton.heightAnchor.constraint(equalToConstant: 18),
+        ])
 
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
@@ -269,8 +284,14 @@ final class ComposerWindow: NSWindow {
 /// Intercepts text-view command keys to give us chat-style behavior:
 ///   - Return       → submit
 ///   - Shift+Return → insert newline
+///   - Escape       → dismiss
+///
+/// Escape needs explicit handling because NSTextView normally maps it to
+/// `cancelOperation:` (used to dismiss completion popups) and swallows the
+/// event before it can reach the window's keyDown override.
 final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
     var onSubmit: (() -> Void)?
+    var onCancel: (() -> Void)?
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {
@@ -279,6 +300,9 @@ final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
             return true
         case #selector(NSResponder.insertLineBreak(_:)):
             textView.insertText("\n", replacementRange: textView.selectedRange())
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            onCancel?()
             return true
         default:
             return false
