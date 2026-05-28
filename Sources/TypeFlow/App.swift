@@ -35,8 +35,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.toggleComposer()
         }
 
+        installMainMenu()
         installMenuBarItem()
         refreshStatus(sessions: [])
+    }
+
+    /// Accessory apps don't auto-install an Edit menu, so Cmd+C/V/X/Z and
+    /// Cmd+Return have no key equivalents. The bar stays hidden but the
+    /// menu's keyEquivalents fire whenever TypeFlow is the active app.
+    private func installMainMenu() {
+        let main = NSMenu()
+
+        // App menu (required slot; we leave it empty other than Quit so the
+        // composer feels like a single-purpose tool).
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit TypeFlow",
+                        action: #selector(NSApp.terminate(_:)),
+                        keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        // Edit menu — provides Cmd+Z/X/C/V/A.
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        let undo = editMenu.addItem(withTitle: "Undo",
+                                    action: Selector(("undo:")), keyEquivalent: "z")
+        undo.keyEquivalentModifierMask = [.command]
+        let redo = editMenu.addItem(withTitle: "Redo",
+                                    action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut",
+                         action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy",
+                         action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste",
+                         action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        main.addItem(editItem)
+
+        // Composer menu — holds the Send action (Cmd+Return).
+        let composerItem = NSMenuItem()
+        let composerMenu = NSMenu(title: "Composer")
+        let send = NSMenuItem(title: "Send to Claude",
+                              action: #selector(ComposerWindow.submit),
+                              keyEquivalent: "\r")
+        send.keyEquivalentModifierMask = [.command]
+        composerMenu.addItem(send)
+        composerItem.submenu = composerMenu
+        main.addItem(composerItem)
+
+        NSApp.mainMenu = main
     }
 
     private func installMenuBarItem() {

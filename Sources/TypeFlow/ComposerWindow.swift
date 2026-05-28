@@ -1,7 +1,7 @@
 import AppKit
 
-final class ComposerWindow: NSPanel {
-    private let textView = NSTextView()
+final class ComposerWindow: NSWindow {
+    let textView = NSTextView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let hintLabel = NSTextField(labelWithString: "⌘↵ send   ⎋ close")
     private var onSubmit: ((String) -> Void)?
@@ -12,13 +12,11 @@ final class ComposerWindow: NSPanel {
 
     init(onSubmit: @escaping (String) -> Void) {
         self.onSubmit = onSubmit
-        // Note on .nonactivatingPanel: we deliberately do NOT use it. macOS's
-        // inline predictive text service only activates for text views in
-        // fully-active app contexts; a non-activating panel leaves the input
-        // context partially attached and predictions never fire.
+        // NSWindow (not NSPanel) — inline predictive text and Writing Tools
+        // attach more reliably to standard windows than to utility panels.
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 220),
-            styleMask: [.borderless, .resizable],
+            styleMask: [.borderless, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -31,7 +29,6 @@ final class ComposerWindow: NSPanel {
 
     private func configureWindow() {
         isMovableByWindowBackground = true
-        isFloatingPanel = true
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         hidesOnDeactivate = false
@@ -215,26 +212,23 @@ final class ComposerWindow: NSPanel {
 
     // MARK: - Keyboard
 
+    /// Cmd+Return is bound via the main menu's "Send" item (see AppDelegate).
+    /// We only need to intercept bare Escape here.
     override func keyDown(with event: NSEvent) {
-        let cmd = event.modifierFlags.contains(.command)
-        // Return / Enter
-        if event.keyCode == 36 || event.keyCode == 76 {
-            if cmd {
-                submit()
-                return
-            }
-        }
-        // Escape
-        if event.keyCode == 53 {
+        if event.keyCode == 53 { // Escape
             hide()
             return
         }
         super.keyDown(with: event)
     }
 
-    private func submit() {
+    /// Called from the main menu's Send item (⌘↵).
+    @objc func submit() {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else {
+            NSSound.beep()
+            return
+        }
         onSubmit?(text)
         clear()
         hide()
