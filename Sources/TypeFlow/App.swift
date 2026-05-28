@@ -122,16 +122,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func sendToClaude(_ text: String) {
-        guard let target = watcher.target() else {
-            NSSound.beep()
-            return
-        }
+        // v2: send into Warp's Rich Input via keystroke synthesis instead of
+        // writing into the claude PTY directly. Rich Input handles paste /
+        // edit / submit natively, so we sidestep every claude-CLI input quirk.
+        // Side effect: we send to whichever Warp tab is frontmost, not to a
+        // specific tty — the session picker is now a visual indicator only.
+        // (Full session-aware tab focusing is a future AX-traversal task.)
         do {
-            try PTYWriter.send(text, to: target.ttyPath)
+            try WarpInjector.send(text)
+        } catch let error as WarpInjector.InjectError {
+            NSSound.beep()
+            fputs("TypeFlow: \(error)\n", stderr)
+            showAlert(message: String(describing: error))
         } catch {
             NSSound.beep()
-            fputs("TypeFlow: failed to send to \(target.ttyPath): \(error)\n", stderr)
+            fputs("TypeFlow: failed to send: \(error)\n", stderr)
         }
+    }
+
+    private func showAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "TypeFlow"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 
