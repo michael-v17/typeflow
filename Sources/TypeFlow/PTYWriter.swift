@@ -37,7 +37,11 @@ enum PTYWriter {
         // the Enter keystroke lands.
         if !bytes.isEmpty { usleep(preSubmitMicros) }
 
-        try writeRaw([0x0D], fd: fd) // CR == Enter
+        // 0x0A (LF) — not 0x0D (CR). When written from outside the terminal,
+        // CR is processed by the renderer as "cursor-to-column-0" before
+        // claude's Ink-based input handler sees it, leaving the text in the
+        // buffer with the caret jumped home. LF reliably triggers submit.
+        try writeRaw([0x0A], fd: fd)
     }
 
     private static func writeChunked(_ bytes: [UInt8], fd: Int32) throws {
