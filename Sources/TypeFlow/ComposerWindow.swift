@@ -31,9 +31,22 @@ final class ComposerWindow: NSWindow {
     }
 
     private func hideTitleBarChrome() {
-        standardWindowButton(.closeButton)?.isHidden = true
+        // Keep the close (red) traffic-light visible — the user needs a
+        // discoverable way to dismiss the composer beyond ⎋ / ⌥Space.
+        // Route its click to hide() so the window survives for the next
+        // toggle instead of being closed (which would tear down the
+        // text view and lose autocorrect state).
+        if let closeButton = standardWindowButton(.closeButton) {
+            closeButton.isHidden = false
+            closeButton.target = self
+            closeButton.action = #selector(closeButtonClicked)
+        }
         standardWindowButton(.miniaturizeButton)?.isHidden = true
         standardWindowButton(.zoomButton)?.isHidden = true
+    }
+
+    @objc private func closeButtonClicked() {
+        hide()
     }
 
     // MARK: - Window chrome
