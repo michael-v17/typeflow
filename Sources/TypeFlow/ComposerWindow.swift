@@ -12,17 +12,27 @@ final class ComposerWindow: NSWindow {
 
     init(onSubmit: @escaping (String) -> Void) {
         self.onSubmit = onSubmit
-        // NSWindow (not NSPanel) — inline predictive text and Writing Tools
-        // attach more reliably to standard windows than to utility panels.
+        // .titled (not .borderless) — Apple Intelligence's inline prediction
+        // service appears to require a titled-window class to attach the
+        // text input context. We hide the title bar visually via
+        // .fullSizeContentView + transparent title bar + hidden buttons so
+        // the composer still looks borderless.
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 220),
-            styleMask: [.borderless, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         configureWindow()
+        hideTitleBarChrome()
         buildContent()
         center()
+    }
+
+    private func hideTitleBarChrome() {
+        standardWindowButton(.closeButton)?.isHidden = true
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
     }
 
     // MARK: - Window chrome
@@ -126,9 +136,9 @@ final class ComposerWindow: NSWindow {
         textView.usesInspectorBar = false
 
         if #available(macOS 14.4, *) {
-            // rawValue 2 = disabled in NSTextInputTraitType
-            // (the Swift name varies across SDKs; raw value is stable)
-            textView.inlinePredictionType = NSTextInputTraitType(rawValue: 2) ?? .default
+            // .default = follow System Settings → Keyboard → Text Input →
+            // Show inline predictive text.
+            textView.inlinePredictionType = .default
         }
         if #available(macOS 15.0, *) {
             textView.writingToolsBehavior = .complete
