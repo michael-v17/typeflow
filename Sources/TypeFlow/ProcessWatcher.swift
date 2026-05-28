@@ -4,7 +4,19 @@ import Foundation
 struct ClaudeSession: Equatable {
     let pid: pid_t
     let ttyPath: String
+    let cwd: String?
     let startTime: TimeInterval
+
+    /// Short human-readable label for the UI — uses the cwd basename if known,
+    /// otherwise falls back to the tty name.
+    var shortLabel: String {
+        let tty = (ttyPath as NSString).lastPathComponent
+        if let cwd, !cwd.isEmpty {
+            let folder = (cwd as NSString).lastPathComponent
+            return "\(folder) · \(tty)"
+        }
+        return tty
+    }
 }
 
 final class ProcessWatcher {
@@ -89,7 +101,8 @@ final class ProcessWatcher {
             }
             let start = TimeInterval(bsd.pbi_start_tvsec)
                       + TimeInterval(bsd.pbi_start_tvusec) / 1_000_000
-            found.append(ClaudeSession(pid: pid, ttyPath: tty, startTime: start))
+            let cwd = workingDirectory(pid: pid)
+            found.append(ClaudeSession(pid: pid, ttyPath: tty, cwd: cwd, startTime: start))
         }
         return found
     }
@@ -115,6 +128,18 @@ final class ProcessWatcher {
         let n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
         guard n == size else { return nil }
         return info
+    }
+
+    private static func workingDirectory(pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let n = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size)
+        guard n == size else { return nil }
+        let path = withUnsafeBytes(of: info.pvi_cdir.vip_path) { raw -> String in
+            let p = raw.bindMemory(to: CChar.self).baseAddress!
+            return String(cString: p)
+        }
+        return path.isEmpty ? nil : path
     }
 
     private static func ttyPath(from info: proc_bsdinfo) -> String? {

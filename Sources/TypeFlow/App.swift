@@ -65,8 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshStatus(sessions: [ClaudeSession]) {
         if let target = watcher.target() {
-            let tty = (target.ttyPath as NSString).lastPathComponent
-            composer.targetDescription = "claude (pid \(target.pid) · \(tty))"
+            composer.targetDescription = "claude (\(target.shortLabel))"
         } else {
             composer.targetDescription = "no Claude Code session"
         }

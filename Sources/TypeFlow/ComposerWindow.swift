@@ -12,9 +12,13 @@ final class ComposerWindow: NSPanel {
 
     init(onSubmit: @escaping (String) -> Void) {
         self.onSubmit = onSubmit
+        // Note on .nonactivatingPanel: we deliberately do NOT use it. macOS's
+        // inline predictive text service only activates for text views in
+        // fully-active app contexts; a non-activating panel leaves the input
+        // context partially attached and predictions never fire.
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 220),
-            styleMask: [.borderless, .nonactivatingPanel, .resizable],
+            styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -180,6 +184,9 @@ final class ComposerWindow: NSPanel {
 
     func hide() {
         orderOut(nil)
+        // Return focus to whatever was active before — without this, dropping
+        // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
+        NSApp.hide(nil)
     }
 
     func currentText() -> String {
