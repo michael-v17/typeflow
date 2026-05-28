@@ -77,16 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = editMenu
         main.addItem(editItem)
 
-        // Composer menu — holds the Send action (Cmd+Return).
-        let composerItem = NSMenuItem()
-        let composerMenu = NSMenu(title: "Composer")
-        let send = NSMenuItem(title: "Send to Claude",
-                              action: #selector(ComposerWindow.submit),
-                              keyEquivalent: "\r")
-        send.keyEquivalentModifierMask = [.command]
-        composerMenu.addItem(send)
-        composerItem.submenu = composerMenu
-        main.addItem(composerItem)
+        // Send is handled by ComposerTextDelegate (plain Enter), not via
+        // a menu key equivalent — NSTextView intercepts Cmd+Return as
+        // insertNewlineIgnoringFieldEditor: before menu equivalents fire.
 
         NSApp.mainMenu = main
     }

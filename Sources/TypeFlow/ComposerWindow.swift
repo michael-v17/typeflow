@@ -3,8 +3,9 @@ import AppKit
 final class ComposerWindow: NSWindow {
     let textView = NSTextView()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let hintLabel = NSTextField(labelWithString: "⌘↵ send   ⎋ close")
+    private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
     private var onSubmit: ((String) -> Void)?
+    private let textDelegate = ComposerTextDelegate()
 
     var targetDescription: String = "no Claude Code session" {
         didSet { statusLabel.stringValue = "→ " + targetDescription }
@@ -145,6 +146,8 @@ final class ComposerWindow: NSWindow {
         }
 
         scroll.documentView = textView
+        textDelegate.onSubmit = { [weak self] in self?.submit() }
+        textView.delegate = textDelegate
 
         // Footer
         let footer = NSView()
@@ -228,8 +231,8 @@ final class ComposerWindow: NSWindow {
 
     // MARK: - Keyboard
 
-    /// Cmd+Return is bound via the main menu's "Send" item (see AppDelegate).
-    /// We only need to intercept bare Escape here.
+    /// Enter submission goes through ComposerTextDelegate; Escape is handled
+    /// here because the text view doesn't intercept it.
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape
             hide()
@@ -238,7 +241,6 @@ final class ComposerWindow: NSWindow {
         super.keyDown(with: event)
     }
 
-    /// Called from the main menu's Send item (⌘↵).
     @objc func submit() {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -248,5 +250,25 @@ final class ComposerWindow: NSWindow {
         onSubmit?(text)
         clear()
         hide()
+    }
+}
+
+/// Intercepts text-view command keys to give us chat-style behavior:
+///   - Return       → submit
+///   - Shift+Return → insert newline
+final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
+    var onSubmit: (() -> Void)?
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            onSubmit?()
+            return true
+        case #selector(NSResponder.insertLineBreak(_:)):
+            textView.insertText("\n", replacementRange: textView.selectedRange())
+            return true
+        default:
+            return false
+        }
     }
 }
