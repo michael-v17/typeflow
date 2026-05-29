@@ -9,11 +9,16 @@ import Carbon.HIToolbox
 ///
 /// Mechanism:
 ///   1. Activate Warp.
-///   2. ⌃G to open Rich Input (no-op if it's already open).
+///   2. ⌃G to open Rich Input. (⌃G *toggles* Rich Input in Warp; because we
+///      close it again after every submit, it's reliably closed when we get
+///      here, so this press reliably opens it.)
 ///   3. Put text on the pasteboard.
 ///   4. ⌘V to paste.
 ///   5. ↵ to submit (when `autoSubmit` is true).
-///   6. Restore pasteboard.
+///   6. ⌃G again to close Rich Input, so keyboard focus returns to claude's TUI
+///      and its interactive prompts (arrow-key menus, y/n) are navigable. Only
+///      when we submitted — an un-submitted draft is left open for editing.
+///   7. Restore pasteboard.
 ///
 /// Requires the Accessibility permission (one-time grant in System Settings →
 /// Privacy & Security → Accessibility).
@@ -84,9 +89,16 @@ enum WarpInjector {
         if autoSubmit {
             sendKey(keyCode: UInt16(kVK_Return), modifiers: [])
             usleep(postSubmitMicros)
+
+            // 6. ⌃G again — close Rich Input so keyboard focus returns to
+            //    claude's TUI. Warp's ⌃G toggles Rich Input (show/hide) and it
+            //    stays open after a submit, otherwise swallowing the keys claude
+            //    expects for its interactive prompts (arrow-key menus, y/n).
+            sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl)
+            usleep(postRichInputMicros)
         }
 
-        // 6. Restore pasteboard.
+        // 7. Restore pasteboard.
         pb.clearContents()
         if let savedString {
             pb.setString(savedString, forType: .string)
