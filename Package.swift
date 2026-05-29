@@ -3,7 +3,11 @@ import PackageDescription
 
 let package = Package(
     name: "TypeFlow",
-    platforms: [.macOS(.v14)],
+    // Bumped to macOS 26 for the FoundationModels framework (on-device LLM
+    // powering inline ghost-text completion). Drops pre-Tahoe support — the
+    // owner is on 26.4; isolate into a separate target later if wider
+    // distribution is ever needed.
+    platforms: [.macOS("26.0")],
     targets: [
         .executableTarget(
             name: "TypeFlow",
@@ -11,6 +15,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),
+                .linkedFramework("FoundationModels"),
             ]
         )
     ]

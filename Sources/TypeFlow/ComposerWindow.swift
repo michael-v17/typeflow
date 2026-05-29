@@ -1,7 +1,8 @@
 import AppKit
 
 final class ComposerWindow: NSWindow {
-    let textView = NSTextView()
+    let textView = GhostTextView()
+    private let wordCompleter = WordCompleter()
     private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
     private var onSubmit: ((String) -> Void)?
@@ -116,24 +117,21 @@ final class ComposerWindow: NSWindow {
         textView.insertionPointColor = .controlAccentColor
         textView.textContainerInset = NSSize(width: 4, height: 8)
 
-        // Apple text intelligence — only the features that work reliably
-        // inside this borderless window today.
+        // Apple text intelligence. Autocorrect / spelling / grammar / Writing
+        // Tools all work and are kept on — they're complementary to ghost text.
         //
         // smartInsertDeleteEnabled is OFF: when autocorrect has many active
         // suggestions on a long buffer, smart-delete walks through dismissing
         // them one by one before deleting characters, which feels like
         // Backspace is broken. Plain delete behaves predictably.
-        //
-        // inlinePredictionType is .disabled (not .default): leaving it on
-        // .default puts the text view into a partial-prediction state
-        // machine even when no ghost text appears, and that state machine
-        // intercepts Delete. We'll re-enable once we've solved the visible-
-        // ghost-text issue properly (currently tracked: the borderless
-        // window class seems to block the prediction service from attaching).
         textView.isAutomaticSpellingCorrectionEnabled = true
         textView.isAutomaticTextReplacementEnabled = true
-        textView.isAutomaticQuoteSubstitutionEnabled = true
-        textView.isAutomaticDashSubstitutionEnabled = true
+        // Smart quotes/dashes are OFF on purpose: these prompts carry code, paths
+        // and CLI commands that get sent verbatim to Claude. Curly quotes would
+        // corrupt string literals and "--flag" would become an em dash ("—flag").
+        // Straight quotes/dashes are universally safe; flip to true for prose-only.
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextCompletionEnabled = false
         textView.isContinuousSpellCheckingEnabled = true
         textView.isGrammarCheckingEnabled = true
@@ -143,10 +141,12 @@ final class ComposerWindow: NSWindow {
         textView.usesFindBar = false
         textView.usesInspectorBar = false
 
+        // Disable the native inline-prediction overlay. It never rendered
+        // reliably for this window class (proven), and we now draw our OWN gray
+        // ghost text via GhostTextView + GhostCompleter, fully under our control.
+        // Leaving it on only risks the native state machine fighting Delete.
         if #available(macOS 14.4, *) {
-            // .default = follow System Settings → Keyboard → Text Input →
-            // Show inline predictive text.
-            textView.inlinePredictionType = .default
+            textView.inlinePredictionType = .no
         }
         if #available(macOS 15.0, *) {
             textView.writingToolsBehavior = .complete
@@ -155,6 +155,8 @@ final class ComposerWindow: NSWindow {
         scroll.documentView = textView
         textDelegate.onSubmit = { [weak self] in self?.submit() }
         textDelegate.onCancel = { [weak self] in self?.hide() }
+        textDelegate.onTextChanged = { [weak self] in self?.handleTextChange() }
+        textDelegate.onSelectionChanged = { [weak self] in self?.clearGhostIfCaretMoved() }
         textView.delegate = textDelegate
 
         // Footer
@@ -251,6 +253,7 @@ final class ComposerWindow: NSWindow {
     }
 
     func hide() {
+        textView.suggestion = nil
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
         // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
@@ -263,6 +266,80 @@ final class ComposerWindow: NSWindow {
 
     func clear() {
         textView.string = ""
+        textView.suggestion = nil
+    }
+
+    // MARK: - Ghost text (inline word completion)
+
+    /// Guards against re-entrancy when our own edit triggers `textDidChange`.
+    private var isCorrecting = false
+
+    /// Runs on every text change: first apply contraction autocorrect (on a
+    /// finished word), then refresh the word-completion ghost.
+    private func handleTextChange() {
+        autocorrectContraction()
+        updateGhost()
+    }
+
+    /// When the user just typed a word boundary (space/punctuation) right after
+    /// a known apostrophe-less contraction, replace it with the apostrophe form
+    /// (e.g. "dont " → "don't "). One edit, fully undoable; caret preserved.
+    private func autocorrectContraction() {
+        guard !isCorrecting else { return }
+        let ns = textView.string as NSString
+        let sel = textView.selectedRange()
+        let caret = sel.location
+        guard sel.length == 0, caret >= 2, caret <= ns.length else { return }
+
+        // The char just before the caret must be a boundary (non-letter).
+        guard let boundary = Unicode.Scalar(ns.character(at: caret - 1)),
+              !CharacterSet.letters.contains(boundary) else { return }
+
+        // The run of letters ending just before that boundary char.
+        var start = caret - 1
+        while start > 0 {
+            guard let s = Unicode.Scalar(ns.character(at: start - 1)),
+                  CharacterSet.letters.contains(s) else { break }
+            start -= 1
+        }
+        let wordRange = NSRange(location: start, length: (caret - 1) - start)
+        // >= 1 so a lone "i" can be capitalized to "I"; the corrector's map only
+        // matches known words, so other single letters are left alone.
+        guard wordRange.length >= 1 else { return }
+        let word = ns.substring(with: wordRange)
+        guard let corrected = ContractionCorrector.correction(for: word) else { return }
+
+        isCorrecting = true
+        textView.insertText(corrected, replacementRange: wordRange)
+        // Restore the caret to after the trailing boundary char(s).
+        let trailing = caret - (wordRange.location + wordRange.length)
+        let newCaret = wordRange.location + (corrected as NSString).length + trailing
+        textView.setSelectedRange(NSRange(location: newCaret, length: 0))
+        isCorrecting = false
+    }
+
+    /// Completes the word currently being typed,
+    /// but only when the caret is a collapsed insertion point at the END of the
+    /// buffer (the dominant typing case, and where the gray suffix renders
+    /// cleanly without overlapping following text).
+    private func updateGhost() {
+        let ns = textView.string as NSString
+        let sel = textView.selectedRange()
+        guard sel.length == 0, sel.location == ns.length else {
+            textView.suggestion = nil
+            return
+        }
+        textView.suggestion = wordCompleter.completion(in: textView.string, caret: sel.location)
+    }
+
+    /// If the caret moved off the end of the buffer (click, arrow keys), any
+    /// pending suggestion is stale — drop it.
+    private func clearGhostIfCaretMoved() {
+        let ns = textView.string as NSString
+        let sel = textView.selectedRange()
+        if sel.length != 0 || sel.location != ns.length {
+            textView.suggestion = nil
+        }
     }
 
     /// Populates the footer dropdown with the live session list and selects
@@ -322,9 +399,10 @@ final class ComposerWindow: NSWindow {
 }
 
 /// Intercepts text-view command keys to give us chat-style behavior:
+///   - Tab          → accept the inline ghost suggestion (if showing)
 ///   - Return       → submit
 ///   - Shift+Return → insert newline
-///   - Escape       → dismiss
+///   - Escape       → dismiss ghost, else close the composer
 ///
 /// Escape needs explicit handling because NSTextView normally maps it to
 /// `cancelOperation:` (used to dismiss completion popups) and swallows the
@@ -332,20 +410,48 @@ final class ComposerWindow: NSWindow {
 final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
     var onSubmit: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onTextChanged: (() -> Void)?
+    var onSelectionChanged: (() -> Void)?
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        let ghost = textView as? GhostTextView
         switch commandSelector {
+        case #selector(NSResponder.insertTab(_:)):
+            // Accept a showing ghost suggestion as ONE real edit (one undo step,
+            // normal selection/IME accounting). Otherwise fall through to the
+            // default Tab behavior.
+            if let ghost, let suggestion = ghost.suggestion, !suggestion.isEmpty {
+                ghost.insertText(suggestion, replacementRange: ghost.selectedRange())
+                ghost.suggestion = nil
+                return true
+            }
+            return false
         case #selector(NSResponder.insertNewline(_:)):
+            ghost?.suggestion = nil
             onSubmit?()
             return true
         case #selector(NSResponder.insertLineBreak(_:)):
+            ghost?.suggestion = nil
             textView.insertText("\n", replacementRange: textView.selectedRange())
             return true
         case #selector(NSResponder.cancelOperation(_:)):
+            // First Esc dismisses a showing ghost; with none, it closes the composer.
+            if let ghost, ghost.suggestion != nil {
+                ghost.suggestion = nil
+                return true
+            }
             onCancel?()
             return true
         default:
             return false
         }
+    }
+
+    func textDidChange(_ notification: Notification) {
+        onTextChanged?()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        onSelectionChanged?()
     }
 }
