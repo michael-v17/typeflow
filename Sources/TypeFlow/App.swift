@@ -34,6 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         watcher.start()
 
+        // Poll fast only while the composer is open; idle slowly otherwise.
+        composer.onShow = { [weak self] in self?.watcher.boost() }
+        composer.onHide = { [weak self] in self?.watcher.relax() }
+
         // Option+Space (⌥Space)
         hotKey = HotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) { [weak self] in
             self?.toggleComposer()

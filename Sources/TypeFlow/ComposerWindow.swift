@@ -14,6 +14,11 @@ final class ComposerWindow: NSWindow {
     /// Called when the user picks a session from the footer dropdown.
     var onSessionSelected: ((pid_t) -> Void)?
 
+    /// Called when the composer is shown / hidden, so the app can speed up or
+    /// slow down the session-poll cadence.
+    var onShow: (() -> Void)?
+    var onHide: (() -> Void)?
+
     private static let keepOpenKey = "TypeFlowKeepOpenAfterSend"
     /// When on, Enter sends the prompt but leaves the composer open and focused
     /// for the next one. Persisted across launches.
@@ -300,6 +305,7 @@ final class ComposerWindow: NSWindow {
         makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         makeFirstResponder(textView)
+        onShow?() // boost the session poll while we're open
         // Follow the focused Warp tab live while the composer is open.
         lastWarpTitle = nil   // force the first poll to follow
         followTick()
@@ -308,6 +314,7 @@ final class ComposerWindow: NSWindow {
 
     func hide() {
         stopFollowTimer()
+        onHide?() // drop the session poll back to idle cadence
         if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
         textView.suggestion = nil
         orderOut(nil)

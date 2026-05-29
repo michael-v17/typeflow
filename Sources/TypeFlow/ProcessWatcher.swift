@@ -33,9 +33,28 @@ final class ProcessWatcher {
     /// Set TYPEFLOW_DEBUG=1 in the environment to see watcher diagnostics on stderr.
     private static let debug: Bool = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
 
-    func start(interval: TimeInterval = 0.5) {
+    /// Poll cadence: slow while the composer is closed (the common idle state),
+    /// faster only while it's open — so a newly-started session shows up
+    /// promptly in the picker without paying the scan cost continuously.
+    private let idleInterval: TimeInterval = 3.0
+    private let activeInterval: TimeInterval = 1.0
+    private var currentInterval: TimeInterval = 0
+
+    func start() {
+        reschedule(idleInterval)
+    }
+
+    /// Fast cadence + an immediate refresh — call when the composer opens.
+    func boost() { reschedule(activeInterval) }
+    /// Back to the slow idle cadence — call when the composer closes.
+    func relax() { reschedule(idleInterval) }
+
+    private func reschedule(_ interval: TimeInterval) {
+        guard interval != currentInterval else { return }
+        currentInterval = interval
+        timer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: interval)
+        t.schedule(deadline: .now(), repeating: interval) // deadline .now() = refresh immediately
         t.setEventHandler { [weak self] in self?.refresh() }
         t.resume()
         timer = t
