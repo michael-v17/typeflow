@@ -410,6 +410,7 @@ final class ComposerWindow: NSWindow {
     /// sessions that have disappeared are discarded. Selection follows the
     /// current session if set, otherwise the supplied target.
     func setSessions(_ sessions: [ClaudeSession], targetPID: pid_t?) {
+        let previousPIDs = Set(self.sessions.map { $0.pid })
         self.sessions = sessions
         // Forget drafts for sessions that no longer exist.
         let alive = Set(sessions.map { $0.pid })
@@ -437,7 +438,26 @@ final class ComposerWindow: NSWindow {
             sessionPicker.addItem(withTitle: "claude · \(label)")
             sessionPicker.lastItem?.representedObject = NSNumber(value: session.pid)
         }
-        if let pid = currentPID ?? targetPID { selectPicker(pid) }
+
+        // A newly-spawned session becomes the current one — running `claude` in
+        // a terminal should focus that session here, just like a new terminal
+        // tab takes focus. `sorted` is newest-first, so this is the newest pid we
+        // hadn't seen before. Per-session drafts mean the switch loses no input;
+        // shouldAutoFocus only holds off while the user is mid-draft.
+        let newSession = sorted.first { !previousPIDs.contains($0.pid) }
+        if let newSession, shouldAutoFocus(newSession.pid) {
+            switchTo(newSession.pid)
+        } else if let pid = currentPID ?? targetPID {
+            selectPicker(pid)
+        }
+    }
+
+    /// Whether a newly-detected session should steal the composer's selection.
+    /// We never yank the buffer out from under an in-progress draft in the open
+    /// composer; otherwise (closed, or empty) the new session takes over.
+    private func shouldAutoFocus(_ pid: pid_t) -> Bool {
+        guard pid != currentPID else { return false }
+        return !(isVisible && !textView.string.isEmpty)
     }
 
     @objc private func sessionPickerChanged(_ sender: NSPopUpButton) {
