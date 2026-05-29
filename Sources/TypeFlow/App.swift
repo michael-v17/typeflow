@@ -42,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         installMenuBarItem()
         refreshStatus(sessions: [])
+
+        // Accessibility is needed both to send keystrokes to Warp AND to read
+        // Warp's focused tab for session-following — request it up front rather
+        // than only on the first send (prompts once, no-op once granted).
+        _ = WarpInjector.checkAccessibility(prompt: true)
     }
 
     /// Accessory apps don't auto-install an Edit menu, so Cmd+C/V/X/Z and

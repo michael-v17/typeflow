@@ -13,6 +13,10 @@ enum WarpInspector {
         "dev.warp.Warp-Stable", "dev.warp.Warp", "dev.warp.Warp-Preview",
     ]
 
+    /// Whether this process is trusted for the Accessibility API (required to
+    /// read another app's AX tree).
+    static var isTrusted: Bool { AXIsProcessTrusted() }
+
     /// The title of Warp's focused window — its cwd folder name — or nil.
     static func focusedWindowTitle() -> String? {
         guard let warp = warpBundleIDs

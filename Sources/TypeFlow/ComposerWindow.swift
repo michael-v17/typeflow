@@ -18,7 +18,9 @@ final class ComposerWindow: NSWindow {
     /// When on, Enter sends the prompt but leaves the composer open and focused
     /// for the next one. Persisted across launches.
     private var keepOpen: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.keepOpenKey) }
+        // Default ON: keep the composer open after sending unless the user has
+        // explicitly turned it off (object == nil means they never touched it).
+        get { (UserDefaults.standard.object(forKey: Self.keepOpenKey) as? Bool) ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.keepOpenKey) }
     }
 
