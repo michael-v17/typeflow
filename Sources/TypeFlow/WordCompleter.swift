@@ -12,9 +12,21 @@ final class WordCompleter {
     private let tag = NSSpellChecker.uniqueSpellDocumentTag()
     /// Don't suggest until the partial word is at least this many letters.
     private let minPartial = 2
+    /// Pinned English identifier — the composer is English-only by design. Chosen
+    /// from what this machine's spell checker actually offers.
+    private let language: String
 
     init() {
-        checker.automaticallyIdentifiesLanguages = true
+        let available = checker.availableLanguages
+        language = available.first(where: { $0 == "en_US" })
+            ?? available.first(where: { $0.hasPrefix("en") })
+            ?? "en"
+        // English-only: turn OFF auto-detection. Otherwise Spanish candidates
+        // (and Spanish autocorrect) bleed into an English-only terminal. Because
+        // the composer's autocorrect / spellcheck share NSSpellChecker.shared,
+        // this also pins those to English.
+        checker.automaticallyIdentifiesLanguages = false
+        checker.setLanguage(language)
     }
 
     /// The gray suffix to display after the caret, or nil if there's no
@@ -38,7 +50,7 @@ final class WordCompleter {
         let typed = ns.substring(with: range)
         guard let candidates = checker.completions(
                 forPartialWordRange: range, in: fullText,
-                language: nil, inSpellDocumentWithTag: tag),
+                language: language, inSpellDocumentWithTag: tag),
               !candidates.isEmpty else { return nil }
 
         // First candidate that genuinely extends what was typed (case-insensitive

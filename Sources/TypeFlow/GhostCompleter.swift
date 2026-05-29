@@ -31,12 +31,39 @@ final class GhostCompleter {
                   stderr)
             return
         }
+        // Few-shot framing: small on-device models otherwise treat a half-typed
+        // sentence as a chat question and answer it ("Here are a few suggestions…")
+        // instead of continuing it. Showing the Input→Continuation pattern makes
+        // them imitate rather than converse.
         let s = LanguageModelSession(instructions: """
-            You autocomplete the user's in-progress prompt to an AI coding agent.
-            Given the text so far, output ONLY a short, natural continuation — a \
-            few words, at most one clause — that should directly follow it. Do \
-            not repeat their text, do not add quotes or any preamble. If you have \
-            nothing useful to add, output nothing.
+            You are an inline autocomplete (a Copilot-style ghost) for a developer \
+            typing a prompt to an AI coding agent. Given the text so far after \
+            "Input:", you FINISH the exact sentence they are in the middle of \
+            writing, after "Continuation:".
+
+            Your job is to complete THEIR intention — the thought they are clearly \
+            already expressing — not to propose a new idea or the next sentence.
+
+            Rules:
+            - Output ONLY the words that come right after their text and finish the \
+            current thought. It must read as one continuous sentence with the input.
+            - Keep it short: usually just enough to finish the clause. A couple of \
+            extra words are fine ONLY if they make the same intended idea complete.
+            - Always English. NEVER repeat the input. NEVER explain, suggest, list \
+            options, or add a preamble, a label, quotes, or a trailing colon.
+            - If you can't tell what they intend, output nothing.
+
+            Input: can you refactor this function to be more
+            Continuation: readable and remove the duplicated logic
+
+            Input: fix the bug where the modal doesn't
+            Continuation: close when you click outside it
+
+            Input: add a test that checks the parser handles empty
+            Continuation: input without crashing
+
+            Input: if someone wants to code in 2026 they need to know about
+            Continuation: AI-assisted tooling and the fundamentals
             """)
         s.prewarm()
         session = s
@@ -59,15 +86,19 @@ final class GhostCompleter {
 
             let tail = String(prefix.suffix(1000)) // keep well inside the context window
             do {
+                // Mirror the few-shot format so the model fills "Continuation:"
+                // rather than answering the fragment as a chat prompt.
                 let response = try await session.respond(
-                    to: tail,
+                    to: "Input: \(tail)\nContinuation:",
                     options: GenerationOptions(temperature: 0.2, maximumResponseTokens: 16))
                 guard !Task.isCancelled else { return }
 
-                var text = response.content
-                    .replacingOccurrences(of: "\n", with: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { show(""); return }
+                var text = Self.clean(response.content)
+                // Drop empties, chat/meta lapses, and plain echoes of the input.
+                let echoed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased().hasSuffix(text.lowercased())
+                guard !text.isEmpty, !Self.looksLikeMeta(text), !(echoed && text.count >= 3)
+                else { show(""); return }
 
                 // Add a leading space when gluing onto a mid-sentence word.
                 if let last = prefix.last, !last.isWhitespace,
@@ -86,5 +117,48 @@ final class GhostCompleter {
     func cancel() {
         task?.cancel()
         task = nil
+    }
+
+    // MARK: - Output sanitizing
+
+    /// Normalize raw model output: one line, strip an echoed "Continuation:"
+    /// label and a single layer of wrapping quotes, trim.
+    private static func clean(_ raw: String) -> String {
+        // Keep only the first line: the model tends to keep going and spill extra
+        // few-shot "Input:/Continuation:" pairs onto the following lines.
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let nl = t.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+            t = String(t[..<nl])
+        }
+        // Strip an echoed leading label.
+        for label in ["Continuation:", "continuation:", "Output:", "You:"] where t.hasPrefix(label) {
+            t = String(t.dropFirst(label.count))
+        }
+        // Cut anything from an inline new-example marker onward.
+        for marker in ["Input:", "Continuation:"] {
+            if let r = t.range(of: marker) { t = String(t[..<r.lowerBound]) }
+        }
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip a single layer of wrapping quotes.
+        if t.count >= 2, let f = t.first, let l = t.last,
+           (f == "\"" && l == "\"") || (f == "'" && l == "'") {
+            t = String(t.dropFirst().dropLast())
+        }
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// True when the output is the model lapsing into chat/assistant mode — a
+    /// preamble, a meta description ("Here are a few suggestions…"), an echoed
+    /// label, or a refusal — rather than a genuine continuation of the text.
+    private static func looksLikeMeta(_ s: String) -> Bool {
+        let l = s.lowercased()
+        let prefixes = ["here are", "here's", "here is", "sure,", "sure!",
+                        "certainly", "of course", "i'd be happy", "i can help",
+                        "the continuation", "continuation:", "input:", "output:",
+                        "you:", "text:"]
+        if prefixes.contains(where: { l.hasPrefix($0) }) { return true }
+        let substrings = ["suggestions for", "could follow", "following text",
+                          "as an ai", "i'm sorry", "i cannot", "i am unable"]
+        return substrings.contains(where: { l.contains($0) })
     }
 }

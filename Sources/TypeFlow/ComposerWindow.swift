@@ -3,6 +3,7 @@ import AppKit
 final class ComposerWindow: NSWindow {
     let textView = GhostTextView()
     private let wordCompleter = WordCompleter()
+    private let ghostCompleter = GhostCompleter()
     private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
@@ -56,6 +57,9 @@ final class ComposerWindow: NSWindow {
         hideTitleBarChrome()
         buildContent()
         center()
+        // Warm the on-device model once so the first phrase completion is fast.
+        // No-op (logs to stderr) if Foundation Models isn't available.
+        ghostCompleter.bootstrap()
     }
 
     private func hideTitleBarChrome() {
@@ -317,6 +321,7 @@ final class ComposerWindow: NSWindow {
         onHide?() // drop the session poll back to idle cadence
         if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
         textView.suggestion = nil
+        ghostCompleter.cancel()
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
         // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
@@ -391,9 +396,30 @@ final class ComposerWindow: NSWindow {
         let sel = textView.selectedRange()
         guard sel.length == 0, sel.location == ns.length else {
             textView.suggestion = nil
+            ghostCompleter.cancel()
             return
         }
-        textView.suggestion = wordCompleter.completion(in: textView.string, caret: sel.location)
+        // Mid-word → instant local word completion (NSSpellChecker, English).
+        if let word = wordCompleter.completion(in: textView.string, caret: sel.location) {
+            ghostCompleter.cancel()
+            textView.suggestion = word
+            return
+        }
+        // No word to finish (a boundary, or a complete word) → ask the on-device
+        // model for a short, context-aware continuation (Copilot-style, English,
+        // debounced). Clear the stale ghost now; the async callback fills it in
+        // only if the buffer is still exactly what we asked about (else it's stale).
+        textView.suggestion = nil
+        let prefix = textView.string
+        ghostCompleter.requestCompletion(prefix: prefix) { [weak self] suggestion in
+            guard let self else { return }
+            let current = self.textView.string
+            let caret = self.textView.selectedRange()
+            guard current == prefix,
+                  caret.length == 0, caret.location == (current as NSString).length
+            else { return }
+            self.textView.suggestion = suggestion.isEmpty ? nil : suggestion
+        }
     }
 
     /// If the caret moved off the end of the buffer (click, arrow keys), any
@@ -403,6 +429,7 @@ final class ComposerWindow: NSWindow {
         let sel = textView.selectedRange()
         if sel.length != 0 || sel.location != ns.length {
             textView.suggestion = nil
+            ghostCompleter.cancel()
         }
     }
 
