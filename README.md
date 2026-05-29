@@ -1,138 +1,140 @@
 # TypeFlow
 
-> Native macOS text intelligence — autocorrect, predictive typing, grammar, Writing Tools — when you write prompts to **Claude Code in Warp**.
+> **v0.1** · Native macOS text intelligence — autocorrect, inline word completion, grammar, Writing Tools, dictation — when you write prompts to **Claude Code in Warp**.
 
-Terminal emulators don't use `NSTextView`, so they bypass Apple's writing stack. TypeFlow fixes that by giving you a small floating composer with the full Apple text experience, then writing your prompt directly into the target `claude` session's PTY. No copy/paste. No focus juggling. No clipboard hijack.
+Terminal emulators don't use `NSTextView`, so they bypass Apple's writing stack. TypeFlow is a small floating composer that gives you the full Apple text experience, then hands your prompt to **Warp's Rich Input** editor — which pastes and submits it into the focused `claude` session natively. No copy/paste. No clipboard hijack (the pasteboard is saved and restored).
 
-See [`docs/vision.md`](docs/vision.md) for the long-form rationale and [`CLAUDE.md`](CLAUDE.md) for the architecture decision and scope.
+See [`docs/vision.md`](docs/vision.md) for the rationale, [`CLAUDE.md`](CLAUDE.md) for the architecture, and [`docs/status.md`](docs/status.md) for the current state.
+
+---
+
+## Features
+
+- **Apple text intelligence** in the composer — autocorrect, continuous spellcheck, grammar, text replacement, Writing Tools. Smart quotes/dashes are **off** on purpose so `"strings"` and `--flags` in your prompts aren't mangled.
+- **Inline word completion** — finishes the word you're typing (`becom` → `become`) as gray ghost text via the system dictionary (instant, local, English + Spanish auto-detected). **Tab** accepts.
+- **Contraction autocorrect** — `dont` → `don't`, `im` → `I'm`, lone `i` → `I`, on word boundary. A small curated map, so code tokens aren't touched.
+- **Apple dictation** — a mic button (and your system dictation shortcut) dictate straight into the composer.
+- **Keep-open mode** (default on) — Enter sends but leaves the composer open and focused for rapid multi-send.
+- **Multi-session aware** — a footer picker lists every `claude` session (PascalCase names). The composer **follows the focused Warp tab** and keeps a **separate draft per session**, so switching tabs never loses what you typed.
 
 ---
 
 ## Requirements
 
-- macOS 14 or newer (tested on macOS 26)
-- Swift 5.9 toolchain (ships with current Xcode / Command Line Tools)
-- Warp (or any terminal that exposes a `/dev/ttysNNN`) with `claude` running in at least one session
-
-No special entitlements or permissions needed — TypeFlow writes to the target PTY using standard POSIX `open` + `write`, which any process can do.
+- **macOS 26 (Tahoe) or newer.** The build links Apple's `FoundationModels` framework (for a dormant on-device phrase-completion mode), which pins the deployment target to macOS 26.
+- **Warp**, with `claude` running in at least one tab.
+- **Accessibility permission** (required) — used to send keystrokes into Warp's Rich Input and to read which tab is focused. Granted on first launch.
+- **Microphone permission** (optional) — only if you use dictation. Prompted on first use.
+- Swift toolchain from current Xcode / Command Line Tools.
 
 ---
 
-## Quick start
+## Install
 
-### 1. Build
+The proper way (a real, signed `/Applications` app you can Spotlight-search and auto-launch):
 
 ```bash
 git clone https://github.com/michael-v17/typeflow.git
 cd typeflow
-swift build
+
+# 1. one-time: a stable self-signed code-signing identity, so macOS keeps your
+#    Accessibility/Microphone grants across rebuilds (click "Always Allow" on
+#    the first build's codesign prompt).
+./scripts/make-cert.sh
+
+# 2. build the icon + the signed .app, then install it
+./scripts/make-icon.sh
+./scripts/make-app.sh release
+cp -R TypeFlow.app /Applications/
+open /Applications/TypeFlow.app
 ```
 
-### 2. Run
+On first launch, grant **Accessibility** (System Settings → Privacy & Security → Accessibility → TypeFlow), and **Microphone** the first time you dictate. To launch it automatically, add `/Applications/TypeFlow.app` to **System Settings → General → Login Items**.
+
+**Dev mode** (quick iteration, no bundle):
 
 ```bash
 swift run TypeFlow
 ```
 
-Or, after building once, launch the binary directly:
+Note: as a bare binary this won't have dictation or persistent permissions — use the `.app` for real use.
 
-```bash
-.build/debug/TypeFlow &
-```
+---
 
-You should see a **keyboard** icon in the menu bar.
-
-### 3. Use it
+## Use it
 
 | Action | Shortcut |
 |---|---|
-| Open / close composer | **⌥Space** (Option + Space) |
-| Send prompt to `claude` | **⌘↵** (Cmd + Return) |
-| Add a new line in the composer | **↵** (Return) |
-| Close without sending | **⎋** (Escape) |
+| Open / close composer | **⌥Space** |
+| Send prompt to `claude` | **↵** (Enter) |
+| New line | **⇧↵** (Shift + Enter) |
+| Accept inline suggestion | **⇥** (Tab) |
+| Dismiss suggestion / close composer | **⎋** (Escape) |
+| Dictate | the **🎙** button (or your system dictation shortcut) |
 
-The footer shows which `claude` session the composer is targeting, e.g.:
-
-```
-→ claude (pid 47281 · ttys003)         ⌘↵ send   ⎋ close
-```
-
-If no `claude` process is running, the footer says `→ no Claude Code session` and ⌘↵ does nothing (beeps).
-
-### 4. Stop
-
-Three ways, easiest first:
-
-```bash
-# 1. From the menu bar: click the keyboard icon → "Quit TypeFlow"
-
-# 2. From the terminal:
-pkill -f TypeFlow
-
-# 3. If you launched with `swift run`, foreground it and Ctrl-C
-```
+The footer shows the targeted session (e.g. `claude · TypeFlow`), the **keep open** toggle, the mic button, and the hotkey hints. Sending always targets Warp's **frontmost** tab — so switch sessions by clicking the Warp tab (the composer follows it).
 
 ---
 
 ## How it works
 
 ```
-┌─ NSPanel (borderless, translucent, .hudWindow vibrancy) ──┐
-│  NSTextView                                               │
-│    - continuous spellcheck                                │
-│    - auto-correction + auto-replacement                   │
-│    - predictive completion                                │
-│    - grammar checking                                     │
-│    - Writing Tools (macOS 15+)                            │
-└───────────────────────────────────────────────────────────┘
-                         │
-                         │  ⌘↵
-                         ▼
-   ProcessWatcher  ──→ finds running `claude` processes via libproc
-                       picks most recently started (v1 heuristic)
-                         │
-                         ▼
-   PTYWriter       ──→ open("/dev/ttysNNN", O_WRONLY | O_NOCTTY)
-                       write(fd, text + "\n")
-                         │
-                         ▼
-              Warp shows the prompt appear as if typed
+⌥Space → compose with Apple text intelligence → ↵
+                       │
+                       ▼
+          WarpInjector (needs Accessibility):
+            activate Warp
+            ⌃G  open Rich Input
+            ⌘V  paste the prompt
+            ↵   submit  → claude
+            pasteboard restored
 ```
+
+The composer follows the focused Warp tab by reading its window title via the Accessibility API (`WarpInspector`) and matching it to a detected `claude` session.
 
 ### Source layout
 
 | File | Responsibility |
 |---|---|
-| `Sources/TypeFlow/App.swift` | App entry, menu bar item, lifecycle |
-| `Sources/TypeFlow/ComposerWindow.swift` | The translucent floating composer (`NSPanel` + `NSTextView`) |
-| `Sources/TypeFlow/HotKey.swift` | Global ⌥Space registration via Carbon |
-| `Sources/TypeFlow/ProcessWatcher.swift` | Polls `libproc` for live `claude` processes |
-| `Sources/TypeFlow/PTYWriter.swift` | POSIX write to the target tty |
+| `App.swift` | Lifecycle, ⌥Space hotkey, menu bar, launch-time Accessibility prompt |
+| `ComposerWindow.swift` | The floating composer, footer, keyboard handling, Warp tab-follow + per-session drafts |
+| `GhostTextView.swift` | Draws the gray inline suggestion (kept out of the text buffer) |
+| `WordCompleter.swift` | Current-word completion via `NSSpellChecker` |
+| `ContractionCorrector.swift` | Apostrophe fixes (`dont`→`don't`) + `i`→`I` |
+| `GhostCompleter.swift` | **Dormant** — on-device Foundation Models phrase completion (kept for a future toggle) |
+| `WarpInjector.swift` | The send path — keystroke synthesis into Warp's Rich Input |
+| `WarpInspector.swift` | Reads Warp's focused-window title for session-following |
+| `ProcessWatcher.swift` | `libproc` detection of `claude` sessions (adaptive polling) |
+| `HotKey.swift` | Carbon ⌥Space registration |
+| `PTYWriter.swift` | **Legacy** — the old PTY-write path, not used |
+
+### Build helpers (`scripts/`)
+
+| Script | Purpose |
+|---|---|
+| `make-cert.sh` | Create the stable self-signed code-signing identity (run once) |
+| `make-icon.sh` | Render the app icon → `Resources/AppIcon.icns` |
+| `make-app.sh` | Build + bundle + sign `TypeFlow.app` |
+| `render-icon.swift` | The icon drawing code |
 
 ---
 
-## Status
+## Status — v0.1
 
-Spike — works end-to-end on macOS 26.
-
-### What works
-- ⌥Space global hotkey, no permission prompts
-- Native translucent composer with all Apple text intelligence enabled
-- Live detection of `claude` processes
-- Direct PTY write into the target session
+Works end-to-end on macOS 26: composing with Apple text intelligence, word completion, contraction autocorrect, dictation, per-session drafts with live Warp-tab following, and submission into Warp's Rich Input. Packaged as a signed, installable, login-launchable app.
 
 ### Known limits (tracked in [`CLAUDE.md`](CLAUDE.md))
-- **Multi-session routing** uses "most recently started" — not yet the frontmost-Warp-window. Fine for most cases; AX-based mapping is a planned follow-up.
-- **No `.app` bundle yet** — runs as a plain SPM executable. Wrap later for login-launch / signing.
-- **Claude Code only.** Codex, Hermes, Aider, etc. are out of scope for v1 (the architecture generalizes — just a process-name allowlist).
+
+- **Routing is frontmost-tab.** The dropdown swaps the draft but doesn't switch the Warp tab, so to send to a specific session you click its Warp tab. Picker-driven tab switching (AX traversal) is the next step.
+- **Foundation Models phrase mode is dormant** — word completion is the active engine; the on-device LLM continuation is wired but not enabled.
+- **Claude Code + Warp only.** Other agents/terminals are out of scope (Warp's Rich Input is the integration point — see Warp issue #8579).
+- **Self-signed.** The app is locally signed; fine for personal use, not distribution.
 
 ---
 
 ## Why this exists
 
-If you spend hours a day writing prose-heavy prompts to Claude Code, doing it in a terminal that bypasses Apple autocorrect is friction you stop noticing but never stop paying. Safari, Notes, Mail, even the ChatGPT app give you the full Apple writing stack. Your terminal — where you do the most language-dense work in your day — gives you nothing.
-
-TypeFlow gives you that stack back, scoped strictly to the moments you're talking to an AI agent.
+If you spend hours a day writing prose-heavy prompts to Claude Code, doing it in a terminal that bypasses Apple autocorrect is friction you stop noticing but never stop paying. Safari, Notes, Mail, the ChatGPT app — all give you the full Apple writing stack. Your terminal, where you do the most language-dense work in your day, gives you nothing. TypeFlow gives that stack back, scoped to the moments you're talking to an AI agent.
 
 ---
 
