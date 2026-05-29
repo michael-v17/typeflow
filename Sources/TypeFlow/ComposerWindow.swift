@@ -5,13 +5,34 @@ final class ComposerWindow: NSWindow {
     private let wordCompleter = WordCompleter()
     private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
-    private var onSubmit: ((String) -> Void)?
+    private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
+    private let dictateButton = NSButton()
+    /// Returns true if the send succeeded; on false the composer keeps its text.
+    private var onSubmit: ((String) -> Bool)?
     private let textDelegate = ComposerTextDelegate()
 
     /// Called when the user picks a session from the footer dropdown.
     var onSessionSelected: ((pid_t) -> Void)?
 
-    init(onSubmit: @escaping (String) -> Void) {
+    private static let keepOpenKey = "TypeFlowKeepOpenAfterSend"
+    /// When on, Enter sends the prompt but leaves the composer open and focused
+    /// for the next one. Persisted across launches.
+    private var keepOpen: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.keepOpenKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.keepOpenKey) }
+    }
+
+    // Per-session state: a separate draft per Claude session, and live following
+    // of whichever Warp tab is focused.
+    private var sessions: [ClaudeSession] = []
+    private var drafts: [pid_t: String] = [:]
+    private var currentPID: pid_t?
+    /// Last-seen Warp focused-window title. We re-follow only on a real change,
+    /// so a manual dropdown pick isn't immediately overridden by the poll.
+    private var lastWarpTitle: String?
+    private var followTimer: Timer?
+
+    init(onSubmit: @escaping (String) -> Bool) {
         self.onSubmit = onSubmit
         // .titled (not .borderless) — Apple Intelligence's inline prediction
         // service appears to require a titled-window class to attach the
@@ -181,8 +202,29 @@ final class ComposerWindow: NSWindow {
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
 
+        keepOpenCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        keepOpenCheckbox.controlSize = .small
+        keepOpenCheckbox.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        keepOpenCheckbox.target = self
+        keepOpenCheckbox.action = #selector(keepOpenToggled(_:))
+        keepOpenCheckbox.state = keepOpen ? .on : .off
+        keepOpenCheckbox.toolTip = "Enter sends without closing the composer"
+
+        dictateButton.translatesAutoresizingMaskIntoConstraints = false
+        dictateButton.isBordered = false
+        dictateButton.bezelStyle = .accessoryBarAction
+        dictateButton.imagePosition = .imageOnly
+        dictateButton.image = NSImage(systemSymbolName: "mic.fill",
+                                      accessibilityDescription: "Dictate")
+        dictateButton.contentTintColor = .tertiaryLabelColor
+        dictateButton.toolTip = "Dictate (Apple dictation)"
+        dictateButton.target = self
+        dictateButton.action = #selector(startDictationClicked)
+
         footer.addSubview(sessionPicker)
         footer.addSubview(hintLabel)
+        footer.addSubview(keepOpenCheckbox)
+        footer.addSubview(dictateButton)
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -230,6 +272,12 @@ final class ComposerWindow: NSWindow {
 
             sessionPicker.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: -6),
             sessionPicker.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
+            keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
+            dictateButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            dictateButton.widthAnchor.constraint(equalToConstant: 16),
+            dictateButton.heightAnchor.constraint(equalToConstant: 16),
             hintLabel.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             hintLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
         ])
@@ -250,9 +298,15 @@ final class ComposerWindow: NSWindow {
         makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         makeFirstResponder(textView)
+        // Follow the focused Warp tab live while the composer is open.
+        lastWarpTitle = nil   // force the first poll to follow
+        followTick()
+        startFollowTimer()
     }
 
     func hide() {
+        stopFollowTimer()
+        if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
         textView.suggestion = nil
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
@@ -267,6 +321,7 @@ final class ComposerWindow: NSWindow {
     func clear() {
         textView.string = ""
         textView.suggestion = nil
+        if let cur = currentPID { drafts[cur] = "" } // the prompt was sent
     }
 
     // MARK: - Ghost text (inline word completion)
@@ -342,10 +397,16 @@ final class ComposerWindow: NSWindow {
         }
     }
 
-    /// Populates the footer dropdown with the live session list and selects
-    /// whichever session the watcher's target() chose. The user can override
-    /// by picking another item.
+    /// Populates the footer dropdown with the live session list. Drafts for
+    /// sessions that have disappeared are discarded. Selection follows the
+    /// current session if set, otherwise the supplied target.
     func setSessions(_ sessions: [ClaudeSession], targetPID: pid_t?) {
+        self.sessions = sessions
+        // Forget drafts for sessions that no longer exist.
+        let alive = Set(sessions.map { $0.pid })
+        drafts = drafts.filter { alive.contains($0.key) }
+        if let cur = currentPID, !alive.contains(cur) { currentPID = nil }
+
         sessionPicker.removeAllItems()
         guard !sessions.isEmpty else {
             sessionPicker.addItem(withTitle: "→ no Claude Code session")
@@ -355,23 +416,128 @@ final class ComposerWindow: NSWindow {
         sessionPicker.isEnabled = true
         // Sort newest-first so the implicit target sits at the top.
         let sorted = sessions.sorted(by: { $0.startTime > $1.startTime })
-        for session in sorted {
-            let title = "→ claude (\(session.shortLabel))"
-            sessionPicker.addItem(withTitle: title)
+        // PascalCase folder names; append the tty only to disambiguate collisions.
+        let names = sorted.map { Self.sessionName(for: $0) }
+        var counts: [String: Int] = [:]
+        for n in names { counts[n, default: 0] += 1 }
+        for (i, session) in sorted.enumerated() {
+            var label = names[i]
+            if (counts[names[i]] ?? 0) > 1 {
+                label += " (\((session.ttyPath as NSString).lastPathComponent))"
+            }
+            sessionPicker.addItem(withTitle: "claude · \(label)")
             sessionPicker.lastItem?.representedObject = NSNumber(value: session.pid)
         }
-        if let pid = targetPID,
-           let item = sessionPicker.itemArray.first(where: {
-               ($0.representedObject as? NSNumber)?.int32Value == pid
-           }) {
-            sessionPicker.select(item)
-        }
+        if let pid = currentPID ?? targetPID { selectPicker(pid) }
     }
 
     @objc private func sessionPickerChanged(_ sender: NSPopUpButton) {
         guard let pidNumber = sender.selectedItem?.representedObject as? NSNumber
         else { return }
-        onSessionSelected?(pid_t(pidNumber.int32Value))
+        let pid = pid_t(pidNumber.int32Value)
+        switchTo(pid)            // swap to that session's draft
+        onSessionSelected?(pid)
+    }
+
+    // MARK: - Session following & per-session drafts
+
+    /// Swap the composer to a different session's draft, saving the current one
+    /// first so nothing is lost. No-op if already on that session.
+    private func switchTo(_ pid: pid_t) {
+        guard pid != currentPID else { return }
+        if let cur = currentPID { drafts[cur] = textView.string }
+        currentPID = pid
+        textView.string = drafts[pid] ?? ""
+        textView.suggestion = nil
+        selectPicker(pid)
+        let end = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: end, length: 0))
+    }
+
+    private func selectPicker(_ pid: pid_t) {
+        if let item = sessionPicker.itemArray.first(where: {
+            ($0.representedObject as? NSNumber)?.int32Value == pid
+        }) {
+            sessionPicker.select(item)
+        }
+    }
+
+    /// Poll Warp's focused tab; follow it only when the title actually changes,
+    /// so a manual dropdown pick isn't immediately overridden by the poll.
+    @objc private func followTick() {
+        let title = WarpInspector.focusedWindowTitle()
+        guard title != lastWarpTitle else { return }
+        lastWarpTitle = title
+        guard let title, let pid = sessionMatching(warpTitle: title) else { return }
+        switchTo(pid)
+    }
+
+    /// Match Warp's window title to a session. Warp prettifies titles — it
+    /// inserts spaces at camelCase boundaries and changes case ("MyProject" →
+    /// "My Project", "PhotoBox" → "Photo Box") — so we compare a normalized
+    /// form (letters/digits only, lowercased) against the cwd basename first,
+    /// then any ancestor path component.
+    private func sessionMatching(warpTitle: String) -> pid_t? {
+        let t = Self.normalize(warpTitle)
+        guard !t.isEmpty else { return nil }
+        if let s = sessions.first(where: {
+            guard let cwd = $0.cwd else { return false }
+            return Self.normalize((cwd as NSString).lastPathComponent) == t
+        }) { return s.pid }
+        if let s = sessions.first(where: {
+            guard let cwd = $0.cwd else { return false }
+            return (cwd as NSString).pathComponents.contains { Self.normalize($0) == t }
+        }) { return s.pid }
+        return nil
+    }
+
+    private static func normalize(_ s: String) -> String {
+        s.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// PascalCase display name for a session — its cwd folder, or the tty if the
+    /// cwd is unknown. When the leaf folder is a lower-cased variant of an
+    /// ancestor (e.g. ".../PhotoBox/Code/photobox"), we borrow the ancestor's
+    /// better casing so the name reads as the real project ("PhotoBox").
+    private static func sessionName(for s: ClaudeSession) -> String {
+        guard let cwd = s.cwd, !cwd.isEmpty else {
+            return (s.ttyPath as NSString).lastPathComponent
+        }
+        let components = (cwd as NSString).pathComponents
+        let leaf = components.last ?? (cwd as NSString).lastPathComponent
+        let key = normalize(leaf)
+        // Among path components naming the same thing, prefer the best-cased one.
+        let sameName = components.filter { normalize($0) == key }
+        let best = sameName.max(by: { upperCount($0) < upperCount($1) }) ?? leaf
+        return pascalCase(best)
+    }
+
+    private static func upperCount(_ s: String) -> Int {
+        s.filter { $0.isUppercase }.count
+    }
+
+    /// "my-project" / "my_project" / "myProject" → "MyProject". Existing internal
+    /// capitals are preserved, so an already-PascalCase name is left unchanged.
+    private static func pascalCase(_ name: String) -> String {
+        let chunks = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        return chunks.map { chunk -> String in
+            guard let first = chunk.first else { return "" }
+            return first.uppercased() + chunk.dropFirst()
+        }.joined()
+    }
+
+    private func startFollowTimer() {
+        followTimer?.invalidate()
+        let t = Timer.scheduledTimer(timeInterval: 0.4, target: self,
+                                     selector: #selector(followTick),
+                                     userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common) // keep firing during UI tracking
+        followTimer = t
+    }
+
+    private func stopFollowTimer() {
+        followTimer?.invalidate()
+        followTimer = nil
     }
 
     // MARK: - Keyboard
@@ -392,9 +558,34 @@ final class ComposerWindow: NSWindow {
             NSSound.beep()
             return
         }
-        onSubmit?(text)
+        // If the send failed (e.g. Warp not running), keep the text and the
+        // window so the user doesn't lose their prompt.
+        guard onSubmit?(text) == true else { return }
         clear()
-        hide()
+        if keepOpen {
+            // The send activates Warp; re-focus the composer once it has landed
+            // so the next prompt can be typed right away.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                self.makeKeyAndOrderFront(nil)
+                self.makeFirstResponder(self.textView)
+            }
+        } else {
+            hide()
+        }
+    }
+
+    @objc private func keepOpenToggled(_ sender: NSButton) {
+        keepOpen = (sender.state == .on)
+        makeFirstResponder(textView) // keep typing focus after clicking the box
+    }
+
+    @objc private func startDictationClicked() {
+        // startDictation: is the selector the system dictation shortcut invokes;
+        // calling it on the focused text view starts Apple dictation in the box.
+        makeFirstResponder(textView)
+        textView.perform(Selector(("startDictation:")), with: nil)
     }
 }
 
@@ -427,10 +618,20 @@ final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
             }
             return false
         case #selector(NSResponder.insertNewline(_:)):
+            // Shift+Return must insert a newline, NOT submit. In this text view
+            // Shift+Return arrives as insertNewline: — the SAME selector as a
+            // plain Return (it isn't given a distinct insertLineBreak: binding) —
+            // so we disambiguate via the triggering event's modifier flags.
             ghost?.suggestion = nil
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                textView.insertText("\n", replacementRange: textView.selectedRange())
+                return true
+            }
             onSubmit?()
             return true
         case #selector(NSResponder.insertLineBreak(_:)):
+            // Kept in case a key-binding config does route Shift+Return here;
+            // behaves identically (insert a newline).
             ghost?.suggestion = nil
             textView.insertText("\n", replacementRange: textView.selectedRange())
             return true

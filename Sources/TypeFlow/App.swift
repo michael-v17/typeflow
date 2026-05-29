@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         composer = ComposerWindow { [weak self] text in
-            self?.sendToClaude(text)
+            self?.sendToClaude(text) ?? false
         }
         composer.onSessionSelected = { [weak self] pid in
             self?.watcher.preferredPID = pid
@@ -107,13 +107,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func toggleComposer() {
-        // Refresh target before showing so the footer is correct
+        // The composer follows the focused Warp tab itself while open (see
+        // ComposerWindow.show / followTick), so just refresh the list here.
         refreshStatus(sessions: watcher.sessions)
         composer.toggle()
     }
 
-    private func refreshStatus(sessions: [ClaudeSession]) {
-        composer.setSessions(sessions, targetPID: watcher.target()?.pid)
+    private func refreshStatus(sessions: [ClaudeSession], targetPID: pid_t? = nil) {
+        composer.setSessions(sessions, targetPID: targetPID ?? watcher.target()?.pid)
         if let button = statusItem?.button {
             button.toolTip = sessions.isEmpty
                 ? "TypeFlow — no Claude Code session"
@@ -121,7 +122,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func sendToClaude(_ text: String) {
+    /// Returns true if the prompt was sent. False lets the composer keep the
+    /// text (and stay open) instead of clearing on a failed send.
+    @discardableResult
+    private func sendToClaude(_ text: String) -> Bool {
         // v2: send into Warp's Rich Input via keystroke synthesis instead of
         // writing into the claude PTY directly. Rich Input handles paste /
         // edit / submit natively, so we sidestep every claude-CLI input quirk.
@@ -130,13 +134,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (Full session-aware tab focusing is a future AX-traversal task.)
         do {
             try WarpInjector.send(text)
+            return true
         } catch let error as WarpInjector.InjectError {
             NSSound.beep()
             fputs("TypeFlow: \(error)\n", stderr)
             showAlert(message: String(describing: error))
+            return false
         } catch {
             NSSound.beep()
             fputs("TypeFlow: failed to send: \(error)\n", stderr)
+            return false
         }
     }
 
