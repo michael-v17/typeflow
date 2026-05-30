@@ -359,9 +359,7 @@ final class ComposerWindow: NSWindow {
         if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
         textView.suggestion = nil
         ghostCompleter.cancel()
-        grammarReviewer.cancel()
-        textView.setGrammarSpans([])
-        populateGrammarPanel([])
+        clearGrammar()
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
         // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
@@ -375,7 +373,18 @@ final class ComposerWindow: NSWindow {
     func clear() {
         textView.string = ""
         textView.suggestion = nil
+        clearGrammar() // the sent prompt's suggestions don't belong to the empty draft
         if let cur = currentPID { drafts[cur] = "" } // the prompt was sent
+    }
+
+    /// Drop any pending grammar review + its marks/panel. A suggestion belongs to
+    /// the exact draft it was computed from, so we clear it whenever the buffer is
+    /// replaced (send, or switching to another session's draft) to avoid showing a
+    /// fix that no longer matches the visible text.
+    private func clearGrammar() {
+        grammarReviewer.cancel()
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
     }
 
     // MARK: - Ghost text (inline word completion)
@@ -700,9 +709,12 @@ final class ComposerWindow: NSWindow {
         currentPID = pid
         textView.string = drafts[pid] ?? ""
         textView.suggestion = nil
+        clearGrammar() // the previous session's suggestions don't apply to this draft
         selectPicker(pid)
         let end = (textView.string as NSString).length
         textView.setSelectedRange(NSRange(location: end, length: 0))
+        // Re-review the draft we just switched to (no-op if it's empty).
+        if !textView.string.isEmpty { updateGrammar() }
     }
 
     private func selectPicker(_ pid: pid_t) {
