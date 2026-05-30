@@ -22,6 +22,29 @@ final class GhostTextView: NSTextView {
         }
     }
 
+    /// Grammar / naturalness issues to underline (set via `setGrammarSpans`).
+    private(set) var grammarSpans: [GrammarSpan] = [] {
+        didSet { if grammarSpans != oldValue { needsDisplay = true } }
+    }
+
+    /// Replace the underlined grammar spans and refresh the hover tooltips that
+    /// preview each suggestion. Spans whose range falls outside the buffer are
+    /// dropped (stale after an edit).
+    func setGrammarSpans(_ spans: [GrammarSpan]) {
+        let length = textStorage?.length ?? 0
+        grammarSpans = spans.filter { NSMaxRange($0.range) <= length }
+        removeAllToolTips()
+        guard let lm = layoutManager, let tc = textContainer else { return }
+        for span in grammarSpans {
+            let glyphRange = lm.glyphRange(forCharacterRange: span.range, actualCharacterRange: nil)
+            var rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            let tip = "\(span.original) → \(span.correction)  ·  \(span.reason)" as NSString
+            addToolTip(rect, owner: tip, userData: nil)
+        }
+    }
+
     private var ghostAttributes: [NSAttributedString.Key: Any] {
         [.font: font ?? .systemFont(ofSize: 16),
          .foregroundColor: NSColor.placeholderTextColor] // adapts to light/dark
@@ -29,7 +52,32 @@ final class GhostTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawGrammarUnderlines()
         drawGhost()
+    }
+
+    /// Draw a thick orange underline beneath each flagged span — visually
+    /// distinct from the system's red spell-check squiggle. Multi-line spans are
+    /// handled per visual line via `enumerateEnclosingRects`.
+    private func drawGrammarUnderlines() {
+        guard !grammarSpans.isEmpty, let lm = layoutManager, let tc = textContainer else { return }
+        NSColor.systemOrange.setStroke()
+        let origin = textContainerOrigin
+        for span in grammarSpans {
+            let glyphRange = lm.glyphRange(forCharacterRange: span.range, actualCharacterRange: nil)
+            lm.enumerateEnclosingRects(
+                forGlyphRange: glyphRange,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: tc
+            ) { rect, _ in
+                let y = rect.maxY + origin.y - 1
+                let path = NSBezierPath()
+                path.lineWidth = 2
+                path.move(to: NSPoint(x: rect.minX + origin.x, y: y))
+                path.line(to: NSPoint(x: rect.maxX + origin.x, y: y))
+                path.stroke()
+            }
+        }
     }
 
     private func drawGhost() {

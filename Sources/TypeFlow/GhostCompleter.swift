@@ -10,13 +10,49 @@ import FoundationModels
 @MainActor
 final class GhostCompleter {
     private let model = SystemLanguageModel.default
-    private var session: LanguageModelSession?
     private var task: Task<Void, Never>?
+    /// Guards against overlapping model calls (grammar review hits the model too).
+    private var busy = false
 
     /// Minimum prefix length before we bother asking for a completion.
     private let minPrefix = 4
     /// Idle time after the last keystroke before firing a request.
     private let debounce = Duration.milliseconds(300)
+
+    // Few-shot framing: small on-device models otherwise treat a half-typed
+    // sentence as a chat question and answer it ("Here are a few suggestions…")
+    // instead of continuing it. Showing the Input→Continuation pattern makes them
+    // imitate rather than converse.
+    private let instructions = """
+        You are an inline autocomplete (a Copilot-style ghost) for a developer \
+        typing a prompt to an AI coding agent. Given the text so far after \
+        "Input:", you FINISH the exact sentence they are in the middle of \
+        writing, after "Continuation:".
+
+        Your job is to complete THEIR intention — the thought they are clearly \
+        already expressing — not to propose a new idea or the next sentence.
+
+        Rules:
+        - Output ONLY the words that come right after their text and finish the \
+        current thought. It must read as one continuous sentence with the input.
+        - Keep it short: usually just enough to finish the clause. A couple of \
+        extra words are fine ONLY if they make the same intended idea complete.
+        - Always English. NEVER repeat the input. NEVER explain, suggest, list \
+        options, or add a preamble, a label, quotes, or a trailing colon.
+        - If you can't tell what they intend, output nothing.
+
+        Input: can you refactor this function to be more
+        Continuation: readable and remove the duplicated logic
+
+        Input: fix the bug where the modal doesn't
+        Continuation: close when you click outside it
+
+        Input: add a test that checks the parser handles empty
+        Continuation: input without crashing
+
+        Input: if someone wants to code in 2026 they need to know about
+        Continuation: AI-assisted tooling and the fundamentals
+        """
 
     var isAvailable: Bool {
         if case .available = model.availability { return true }
@@ -31,42 +67,9 @@ final class GhostCompleter {
                   stderr)
             return
         }
-        // Few-shot framing: small on-device models otherwise treat a half-typed
-        // sentence as a chat question and answer it ("Here are a few suggestions…")
-        // instead of continuing it. Showing the Input→Continuation pattern makes
-        // them imitate rather than converse.
-        let s = LanguageModelSession(instructions: """
-            You are an inline autocomplete (a Copilot-style ghost) for a developer \
-            typing a prompt to an AI coding agent. Given the text so far after \
-            "Input:", you FINISH the exact sentence they are in the middle of \
-            writing, after "Continuation:".
-
-            Your job is to complete THEIR intention — the thought they are clearly \
-            already expressing — not to propose a new idea or the next sentence.
-
-            Rules:
-            - Output ONLY the words that come right after their text and finish the \
-            current thought. It must read as one continuous sentence with the input.
-            - Keep it short: usually just enough to finish the clause. A couple of \
-            extra words are fine ONLY if they make the same intended idea complete.
-            - Always English. NEVER repeat the input. NEVER explain, suggest, list \
-            options, or add a preamble, a label, quotes, or a trailing colon.
-            - If you can't tell what they intend, output nothing.
-
-            Input: can you refactor this function to be more
-            Continuation: readable and remove the duplicated logic
-
-            Input: fix the bug where the modal doesn't
-            Continuation: close when you click outside it
-
-            Input: add a test that checks the parser handles empty
-            Continuation: input without crashing
-
-            Input: if someone wants to code in 2026 they need to know about
-            Continuation: AI-assisted tooling and the fundamentals
-            """)
-        s.prewarm()
-        session = s
+        // A fresh session is used per request (a reused one accumulates transcript
+        // and overflows the 4096-token window); this just warms the shared model.
+        LanguageModelSession(instructions: instructions).prewarm()
     }
 
     /// Debounced. Cancels any in-flight request, waits out the debounce, then
@@ -76,13 +79,16 @@ final class GhostCompleter {
     func requestCompletion(prefix: String, show: @escaping (String) -> Void) {
         task?.cancel()
         let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isAvailable, let session, trimmed.count >= minPrefix else { show(""); return }
+        guard isAvailable, trimmed.count >= minPrefix else { show(""); return }
 
         task = Task {
             try? await Task.sleep(for: debounce)
-            guard !Task.isCancelled else { return }
-            // One request per session — skip if the previous one is still going.
-            guard !session.isResponding else { return }
+            guard !Task.isCancelled, !busy else { return }
+            busy = true
+            defer { busy = false }
+            // Fresh session per request — a reused session accumulates transcript
+            // and overflows the context window after a dozen-ish calls.
+            let session = LanguageModelSession(instructions: instructions)
 
             let tail = String(prefix.suffix(1000)) // keep well inside the context window
             do {

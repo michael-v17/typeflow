@@ -4,6 +4,15 @@ final class ComposerWindow: NSWindow {
     let textView = GhostTextView()
     private let wordCompleter = WordCompleter()
     private let ghostCompleter = GhostCompleter()
+    private let grammarReviewer = GrammarReviewer()
+    /// Suggestions panel (between the text and the footer) listing the current
+    /// grammar/naturalness fixes; the window grows downward to fit it.
+    private let grammarPanel = NSStackView()
+    private var grammarPanelHeight: NSLayoutConstraint!
+    private var currentSpans: [GrammarSpan] = []
+    /// How much window height the panel currently adds (0 when there are no issues).
+    private var panelExtraHeight: CGFloat = 0
+    private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
@@ -60,6 +69,7 @@ final class ComposerWindow: NSWindow {
         // Warm the on-device model once so the first phrase completion is fast.
         // No-op (logs to stderr) if Foundation Models isn't available.
         ghostCompleter.bootstrap()
+        grammarReviewer.bootstrap()
     }
 
     private func hideTitleBarChrome() {
@@ -232,6 +242,16 @@ final class ComposerWindow: NSWindow {
         dictateButton.target = self
         dictateButton.action = #selector(startDictationClicked)
 
+        // Grammar suggestions panel: a vertical list shown between the text and
+        // the footer when the reviewer finds issues; the window grows to fit it.
+        grammarPanel.translatesAutoresizingMaskIntoConstraints = false
+        grammarPanel.orientation = .vertical
+        grammarPanel.alignment = .leading
+        grammarPanel.distribution = .fill
+        grammarPanel.spacing = 4
+        grammarPanel.isHidden = true
+        grammarPanel.clipsToBounds = true
+
         footer.addSubview(sessionPicker)
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
@@ -243,6 +263,7 @@ final class ComposerWindow: NSWindow {
 
         let container: NSView = blur
         container.addSubview(scroll)
+        container.addSubview(grammarPanel)
         container.addSubview(separator)
         container.addSubview(footer)
 
@@ -265,11 +286,24 @@ final class ComposerWindow: NSWindow {
             closeButton.heightAnchor.constraint(equalToConstant: 18),
         ])
 
+        // The text area prefers a fixed height (priority high, not required, so a
+        // manual vertical window-resize can still stretch it). Without this the
+        // scroll view is the only unconstrained element in the vertical chain and
+        // greedily absorbs the window growth meant for the grammar panel —
+        // collapsing the panel to height 0 (the bug that hid the suggestions).
+        let scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 140)
+        scrollHeight.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
+            scrollHeight,
+            scroll.bottomAnchor.constraint(equalTo: grammarPanel.topAnchor, constant: -8),
+
+            grammarPanel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            grammarPanel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            grammarPanel.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -10),
 
             separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
@@ -292,6 +326,9 @@ final class ComposerWindow: NSWindow {
             hintLabel.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             hintLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
         ])
+
+        grammarPanelHeight = grammarPanel.heightAnchor.constraint(equalToConstant: 0)
+        grammarPanelHeight.isActive = true
     }
 
     // MARK: - Behavior
@@ -322,6 +359,9 @@ final class ComposerWindow: NSWindow {
         if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
         textView.suggestion = nil
         ghostCompleter.cancel()
+        grammarReviewer.cancel()
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
         // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
@@ -348,6 +388,105 @@ final class ComposerWindow: NSWindow {
     private func handleTextChange() {
         autocorrectContraction()
         updateGhost()
+        updateGrammar()
+    }
+
+    /// Grammar/naturalness review. Existing marks go stale the instant the text
+    /// changes, so clear them now and re-mark after the (debounced) review lands.
+    private func updateGrammar() {
+        // Marks + panel go stale the instant the text changes; clear now and
+        // re-populate after the (debounced) review lands.
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
+        let text = textView.string
+        grammarReviewer.review(text) { [weak self] spans in
+            guard let self, self.textView.string == text else { return } // ignore stale
+            self.textView.setGrammarSpans(spans)
+            self.populateGrammarPanel(spans)
+        }
+    }
+
+    /// Rebuild the suggestions panel and grow/shrink the window to fit it.
+    private func populateGrammarPanel(_ spans: [GrammarSpan]) {
+        if Self.debug { fputs("TypeFlow: grammar panel populate spans=\(spans.count)\n", stderr) }
+        currentSpans = spans
+        grammarPanel.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let shown = Array(spans.prefix(5)) // cap the list; underlines still mark them all
+        for (i, span) in shown.enumerated() {
+            grammarPanel.addArrangedSubview(makeGrammarRow(span, index: i))
+        }
+        grammarPanel.isHidden = shown.isEmpty
+        let n = CGFloat(shown.count)
+        setPanelHeight(shown.isEmpty ? 0 : n * 22 + max(0, n - 1) * 4)
+    }
+
+    /// One "original → correction · reason   [Fix]" row.
+    private func makeGrammarRow(_ span: GrammarSpan, index: Int) -> NSView {
+        let str = NSMutableAttributedString()
+        str.append(NSAttributedString(string: span.original, attributes: [
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .font: NSFont.systemFont(ofSize: 12)]))
+        str.append(NSAttributedString(string: "  →  ", attributes: [
+            .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 12)]))
+        str.append(NSAttributedString(string: span.correction, attributes: [
+            .foregroundColor: NSColor.controlAccentColor,
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium)]))
+        str.append(NSAttributedString(string: "   \(span.reason)", attributes: [
+            .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 11)]))
+
+        let label = NSTextField(labelWithAttributedString: str)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let fix = NSButton(title: "Fix", target: self, action: #selector(grammarFixClicked(_:)))
+        fix.tag = index
+        fix.controlSize = .small
+        fix.bezelStyle = .rounded
+        fix.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [label, fix])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalTo: grammarPanel.widthAnchor).isActive = true
+        row.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        return row
+    }
+
+    @objc private func grammarFixClicked(_ sender: NSButton) {
+        let i = sender.tag
+        guard i >= 0, i < currentSpans.count else { return }
+        applyGrammarSpan(currentSpans[i])
+    }
+
+    /// Replace just this span with its correction — one undoable edit, the rest of
+    /// the prompt untouched. The text change re-runs the review for any remainder.
+    private func applyGrammarSpan(_ span: GrammarSpan) {
+        let ns = textView.string as NSString
+        guard NSMaxRange(span.range) <= ns.length,
+              ns.substring(with: span.range) == span.original else {
+            populateGrammarPanel([]); textView.setGrammarSpans([]); return // stale
+        }
+        makeFirstResponder(textView)
+        textView.insertText(span.correction, replacementRange: span.range)
+    }
+
+    /// Grow the window downward (top edge fixed) to make room for the panel.
+    private func setPanelHeight(_ h: CGFloat) {
+        let delta = h - panelExtraHeight
+        guard abs(delta) > 0.5 else { return }
+        panelExtraHeight = h
+        grammarPanelHeight.constant = h
+        var f = frame
+        f.size.height += delta
+        f.origin.y -= delta
+        setFrame(f, display: true)
+        contentView?.layoutSubtreeIfNeeded()
+        if Self.debug {
+            fputs("TypeFlow: setPanelHeight h=\(h) delta=\(delta) frameH=\(f.size.height) panelFrame=\(grammarPanel.frame)\n", stderr)
+        }
     }
 
     /// When the user just typed a word boundary (space/punctuation) right after
