@@ -412,12 +412,45 @@ final class ComposerWindow: NSWindow {
         currentSpans = spans
         grammarPanel.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let shown = Array(spans.prefix(5)) // cap the list; underlines still mark them all
-        for (i, span) in shown.enumerated() {
-            grammarPanel.addArrangedSubview(makeGrammarRow(span, index: i))
+        var rows: [NSView] = []
+        // A "Fix all" header only earns its row when there's more than one issue.
+        if shown.count >= 2 { rows.append(makeFixAllRow(count: shown.count)) }
+        for (i, span) in shown.enumerated() { rows.append(makeGrammarRow(span, index: i)) }
+        for row in rows {
+            grammarPanel.addArrangedSubview(row)
+            // Activate the full-width constraint ONLY after the row joins
+            // grammarPanel — before that the two anchors share no common ancestor
+            // and `.isActive = true` throws, aborting the whole populate (the bug
+            // that left detection + underlines working but no panel).
+            row.widthAnchor.constraint(equalTo: grammarPanel.widthAnchor).isActive = true
         }
-        grammarPanel.isHidden = shown.isEmpty
-        let n = CGFloat(shown.count)
-        setPanelHeight(shown.isEmpty ? 0 : n * 22 + max(0, n - 1) * 4)
+        grammarPanel.isHidden = rows.isEmpty
+        let n = CGFloat(rows.count)
+        setPanelHeight(rows.isEmpty ? 0 : n * 22 + max(0, n - 1) * 4)
+    }
+
+    /// Header row shown above the suggestions when there are 2+ issues: a count
+    /// on the left and a "Fix all" button that applies every fix at once.
+    private func makeFixAllRow(count: Int) -> NSView {
+        let label = NSTextField(labelWithString: "\(count) suggestions")
+        label.font = NSFont.systemFont(ofSize: 11)
+        label.textColor = .tertiaryLabelColor
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let fixAll = NSButton(title: "Fix all", target: self,
+                              action: #selector(grammarFixAllClicked))
+        fixAll.controlSize = .small
+        fixAll.bezelStyle = .rounded
+        fixAll.contentTintColor = .systemOrange
+        fixAll.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [label, fixAll])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        return row
     }
 
     /// One "original → correction · reason   [Fix]" row.
@@ -430,7 +463,7 @@ final class ComposerWindow: NSWindow {
         str.append(NSAttributedString(string: "  →  ", attributes: [
             .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 12)]))
         str.append(NSAttributedString(string: span.correction, attributes: [
-            .foregroundColor: NSColor.controlAccentColor,
+            .foregroundColor: NSColor.systemOrange, // match the in-text underline
             .font: NSFont.systemFont(ofSize: 12, weight: .medium)]))
         str.append(NSAttributedString(string: "   \(span.reason)", attributes: [
             .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 11)]))
@@ -444,13 +477,15 @@ final class ComposerWindow: NSWindow {
         fix.tag = index
         fix.controlSize = .small
         fix.bezelStyle = .rounded
+        fix.contentTintColor = .systemOrange
         fix.setContentHuggingPriority(.required, for: .horizontal)
 
         let row = NSStackView(views: [label, fix])
         row.orientation = .horizontal
         row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalTo: grammarPanel.widthAnchor).isActive = true
+        // Width is constrained by the caller AFTER the row is added to grammarPanel
+        // (see populateGrammarPanel) — doing it here throws (no common ancestor yet).
         row.heightAnchor.constraint(equalToConstant: 22).isActive = true
         return row
     }
@@ -459,6 +494,27 @@ final class ComposerWindow: NSWindow {
         let i = sender.tag
         guard i >= 0, i < currentSpans.count else { return }
         applyGrammarSpan(currentSpans[i])
+    }
+
+    /// Apply every current fix in one go. Edits run right-to-left so each span's
+    /// absolute range is still valid when we reach it (edits to the right never
+    /// shift positions to the left), wrapped in one undo group so a single ⌘Z
+    /// reverts the whole batch. Each span is re-validated against the live text.
+    @objc private func grammarFixAllClicked() {
+        let ordered = currentSpans.sorted { $0.range.location > $1.range.location }
+        makeFirstResponder(textView)
+        textView.undoManager?.beginUndoGrouping()
+        for span in ordered {
+            let ns = textView.string as NSString
+            guard NSMaxRange(span.range) <= ns.length,
+                  ns.substring(with: span.range) == span.original else { continue }
+            textView.insertText(span.correction, replacementRange: span.range)
+        }
+        textView.undoManager?.endUndoGrouping()
+        // The edits fire handleTextChange → updateGrammar, which clears the marks
+        // and re-reviews; clear eagerly too so the panel doesn't flash stale rows.
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
     }
 
     /// Replace just this span with its correction — one undoable edit, the rest of

@@ -65,6 +65,8 @@ final class GrammarReviewer {
         - If the text is already correct and natural, return an empty list.
         """
 
+    private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
+
     var isAvailable: Bool {
         if case .available = model.availability { return true }
         return false
@@ -85,11 +87,18 @@ final class GrammarReviewer {
     func review(_ text: String, show: @escaping ([GrammarSpan]) -> Void) {
         task?.cancel()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isAvailable, trimmed.count >= minChars else { show([]); return }
+        guard isAvailable, trimmed.count >= minChars else {
+            if Self.debug { fputs("TypeFlow: review skip (avail=\(isAvailable) len=\(trimmed.count))\n", stderr) }
+            show([]); return
+        }
 
         task = Task {
             try? await Task.sleep(for: debounce)
-            guard !Task.isCancelled, !busy else { return }
+            guard !Task.isCancelled else { return }
+            guard !busy else {
+                if Self.debug { fputs("TypeFlow: review skip (busy)\n", stderr) }
+                return
+            }
             busy = true
             defer { busy = false }
             // Fresh session per request: a reused session accumulates transcript
@@ -100,9 +109,16 @@ final class GrammarReviewer {
                     to: text, generating: GrammarReview.self,
                     options: GenerationOptions(temperature: 0.1))
                 guard !Task.isCancelled else { return }
-                show(Self.locate(response.content.fixes, in: text))
+                let located = Self.locate(response.content.fixes, in: text)
+                if Self.debug {
+                    fputs("TypeFlow: review OK raw=\(response.content.fixes.count) located=\(located.count)\n", stderr)
+                    for f in response.content.fixes {
+                        fputs("TypeFlow:   fix \(f.original.debugDescription) -> \(f.correction.debugDescription)\n", stderr)
+                    }
+                }
+                show(located)
             } catch {
-                // Best-effort: never surface an error, just clear.
+                if Self.debug { fputs("TypeFlow: review ERROR \(error)\n", stderr) }
                 if !Task.isCancelled { show([]) }
             }
         }
