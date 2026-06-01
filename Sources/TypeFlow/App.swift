@@ -20,8 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        composer = ComposerWindow { [weak self] text in
-            self?.sendToClaude(text) ?? false
+        composer = ComposerWindow { [weak self] text, dictated in
+            self?.sendToClaude(text, dictated: dictated) ?? false
         }
         composer.onSessionSelected = { [weak self] pid in
             self?.watcher.preferredPID = pid
@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Returns true if the prompt was sent. False lets the composer keep the
     /// text (and stay open) instead of clearing on a failed send.
     @discardableResult
-    private func sendToClaude(_ text: String) -> Bool {
+    private func sendToClaude(_ text: String, dictated: Bool) -> Bool {
         // v2: send into Warp's Rich Input via keystroke synthesis instead of
         // writing into the claude PTY directly. Rich Input handles paste /
         // edit / submit natively, so we sidestep every claude-CLI input quirk.
@@ -142,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // specific tty — the session picker is now a visual indicator only.
         // (Full session-aware tab focusing is a future AX-traversal task.)
         do {
-            try WarpInjector.send(text)
+            try WarpInjector.send(text, dictated: dictated)
             return true
         } catch let error as WarpInjector.InjectError {
             NSSound.beep()

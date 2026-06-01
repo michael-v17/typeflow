@@ -18,7 +18,8 @@ final class ComposerWindow: NSWindow {
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
     private let dictateButton = NSButton()
     /// Returns true if the send succeeded; on false the composer keeps its text.
-    private var onSubmit: ((String) -> Bool)?
+    /// Second arg: whether this draft was dictated (→ send carries the ;;v marker).
+    private var onSubmit: ((String, Bool) -> Bool)?
     private let textDelegate = ComposerTextDelegate()
 
     /// Called when the user picks a session from the footer dropdown.
@@ -43,13 +44,21 @@ final class ComposerWindow: NSWindow {
     // of whichever Warp tab is focused.
     private var sessions: [ClaudeSession] = []
     private var drafts: [pid_t: String] = [:]
+    /// Per-session "this draft was dictated" flag, parallel to `drafts`. When set,
+    /// the send carries the ;;v voice marker so the observer runs its
+    /// dictation-misrecognition + naturalness analysis. Conservative: once the mic
+    /// is used for a draft, the whole send is treated as voice.
+    private var draftsDictated: [pid_t: Bool] = [:]
+    /// Live dictated flag for the visible draft (mirrors draftsDictated[currentPID],
+    /// the way textView.string mirrors drafts[currentPID]).
+    private var liveDictated = false
     private var currentPID: pid_t?
     /// Last-seen Warp focused-window title. We re-follow only on a real change,
     /// so a manual dropdown pick isn't immediately overridden by the poll.
     private var lastWarpTitle: String?
     private var followTimer: Timer?
 
-    init(onSubmit: @escaping (String) -> Bool) {
+    init(onSubmit: @escaping (String, Bool) -> Bool) {
         self.onSubmit = onSubmit
         // .titled (not .borderless) — Apple Intelligence's inline prediction
         // service appears to require a titled-window class to attach the
@@ -356,7 +365,7 @@ final class ComposerWindow: NSWindow {
     func hide() {
         stopFollowTimer()
         onHide?() // drop the session poll back to idle cadence
-        if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
+        if let cur = currentPID { drafts[cur] = textView.string; draftsDictated[cur] = liveDictated } // preserve draft
         textView.suggestion = nil
         ghostCompleter.cancel()
         clearGrammar()
@@ -374,7 +383,9 @@ final class ComposerWindow: NSWindow {
         textView.string = ""
         textView.suggestion = nil
         clearGrammar() // the sent prompt's suggestions don't belong to the empty draft
-        if let cur = currentPID { drafts[cur] = "" } // the prompt was sent
+        liveDictated = false
+        refreshDictateButton()
+        if let cur = currentPID { drafts[cur] = ""; draftsDictated[cur] = false } // the prompt was sent
     }
 
     /// Drop any pending grammar review + its marks/panel. A suggestion belongs to
@@ -646,6 +657,7 @@ final class ComposerWindow: NSWindow {
         // Forget drafts for sessions that no longer exist.
         let alive = Set(sessions.map { $0.pid })
         drafts = drafts.filter { alive.contains($0.key) }
+        draftsDictated = draftsDictated.filter { alive.contains($0.key) }
         if let cur = currentPID, !alive.contains(cur) { currentPID = nil }
 
         sessionPicker.removeAllItems()
@@ -705,9 +717,11 @@ final class ComposerWindow: NSWindow {
     /// first so nothing is lost. No-op if already on that session.
     private func switchTo(_ pid: pid_t) {
         guard pid != currentPID else { return }
-        if let cur = currentPID { drafts[cur] = textView.string }
+        if let cur = currentPID { drafts[cur] = textView.string; draftsDictated[cur] = liveDictated }
         currentPID = pid
         textView.string = drafts[pid] ?? ""
+        liveDictated = draftsDictated[pid] ?? false
+        refreshDictateButton()
         textView.suggestion = nil
         clearGrammar() // the previous session's suggestions don't apply to this draft
         selectPicker(pid)
@@ -823,7 +837,7 @@ final class ComposerWindow: NSWindow {
         }
         // If the send failed (e.g. Warp not running), keep the text and the
         // window so the user doesn't lose their prompt.
-        guard onSubmit?(text) == true else { return }
+        guard onSubmit?(text, liveDictated) == true else { return }
         clear()
         if keepOpen {
             // The send activates Warp; re-focus the composer once it has landed
@@ -847,8 +861,18 @@ final class ComposerWindow: NSWindow {
     @objc private func startDictationClicked() {
         // startDictation: is the selector the system dictation shortcut invokes;
         // calling it on the focused text view starts Apple dictation in the box.
+        // Mark this draft as dictated so the send carries the ;;v voice marker and
+        // the observer runs its dictation-misrecognition + naturalness analysis.
+        liveDictated = true
+        refreshDictateButton()
         makeFirstResponder(textView)
         textView.perform(Selector(("startDictation:")), with: nil)
+    }
+
+    /// Sync the mic button tint with the dictated state — it glows accent when the
+    /// current draft will be sent as voice (;;v), neutral otherwise.
+    private func refreshDictateButton() {
+        dictateButton.contentTintColor = liveDictated ? .controlAccentColor : .tertiaryLabelColor
     }
 }
 
