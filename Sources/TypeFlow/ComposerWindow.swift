@@ -13,7 +13,7 @@ final class ComposerWindow: NSWindow {
     /// How much window height the panel currently adds (0 when there are no issues).
     private var panelExtraHeight: CGFloat = 0
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
-    private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
     private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
     private let dictateButton = NSButton()
@@ -21,9 +21,6 @@ final class ComposerWindow: NSWindow {
     /// Second arg: whether this draft was dictated (→ send carries the ;;v marker).
     private var onSubmit: ((String, Bool) -> Bool)?
     private let textDelegate = ComposerTextDelegate()
-
-    /// Called when the user picks a session from the footer dropdown.
-    var onSessionSelected: ((pid_t) -> Void)?
 
     /// Called when the composer is shown / hidden, so the app can speed up or
     /// slow down the session-poll cadence.
@@ -100,7 +97,11 @@ final class ComposerWindow: NSWindow {
     private func configureWindow() {
         isMovableByWindowBackground = true
         level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        // .moveToActiveSpace (not .canJoinAllSpaces): keep the floating level so the
+        // composer stays above other windows, but show it ONLY on the desktop the
+        // user is working on — invoking ⌥Space brings it to the current Space, and
+        // switching to another Space doesn't reveal a stray TypeFlow window there.
+        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient]
         hidesOnDeactivate = false
         isOpaque = false
         backgroundColor = .clear
@@ -214,19 +215,14 @@ final class ComposerWindow: NSWindow {
         let footer = NSView()
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        sessionPicker.translatesAutoresizingMaskIntoConstraints = false
-        sessionPicker.isBordered = false
-        sessionPicker.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        sessionPicker.controlSize = .small
-        sessionPicker.target = self
-        sessionPicker.action = #selector(sessionPickerChanged(_:))
-        if let cell = sessionPicker.cell as? NSPopUpButtonCell {
-            cell.arrowPosition = .arrowAtBottom
-            cell.bezelStyle = .accessoryBarAction
-        }
-        // Seed with the empty state — App will repopulate via setSessions.
-        sessionPicker.addItem(withTitle: "→ no Claude Code session")
-        sessionPicker.isEnabled = false
+        // Read-only indicator of the session we're on — i.e. the frontmost Warp
+        // tab the send will land in. Not interactive: routing is "the tab you have
+        // focused in Warp", so the label just confirms you're on the right one.
+        sessionLabel.translatesAutoresizingMaskIntoConstraints = false
+        sessionLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        sessionLabel.textColor = .secondaryLabelColor
+        sessionLabel.lineBreakMode = .byTruncatingTail
+        sessionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
@@ -261,7 +257,7 @@ final class ComposerWindow: NSWindow {
         grammarPanel.isHidden = true
         grammarPanel.clipsToBounds = true
 
-        footer.addSubview(sessionPicker)
+        footer.addSubview(sessionLabel)
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
         footer.addSubview(dictateButton)
@@ -324,8 +320,9 @@ final class ComposerWindow: NSWindow {
             footer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
             footer.heightAnchor.constraint(equalToConstant: 18),
 
-            sessionPicker.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: -6),
-            sessionPicker.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: dictateButton.leadingAnchor, constant: -8),
             keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
             keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
@@ -660,39 +657,46 @@ final class ComposerWindow: NSWindow {
         draftsDictated = draftsDictated.filter { alive.contains($0.key) }
         if let cur = currentPID, !alive.contains(cur) { currentPID = nil }
 
-        sessionPicker.removeAllItems()
         guard !sessions.isEmpty else {
-            sessionPicker.addItem(withTitle: "→ no Claude Code session")
-            sessionPicker.isEnabled = false
+            currentPID = nil
+            updateSessionLabel(targetPID: nil)
             return
         }
-        sessionPicker.isEnabled = true
-        // Sort newest-first so the implicit target sits at the top.
-        let sorted = sessions.sorted(by: { $0.startTime > $1.startTime })
-        // PascalCase folder names; append the tty only to disambiguate collisions.
-        let names = sorted.map { Self.sessionName(for: $0) }
-        var counts: [String: Int] = [:]
-        for n in names { counts[n, default: 0] += 1 }
-        for (i, session) in sorted.enumerated() {
-            var label = names[i]
-            if (counts[names[i]] ?? 0) > 1 {
-                label += " (\((session.ttyPath as NSString).lastPathComponent))"
-            }
-            sessionPicker.addItem(withTitle: "claude · \(label)")
-            sessionPicker.lastItem?.representedObject = NSNumber(value: session.pid)
-        }
-
         // A newly-spawned session becomes the current one — running `claude` in
         // a terminal should focus that session here, just like a new terminal
         // tab takes focus. `sorted` is newest-first, so this is the newest pid we
         // hadn't seen before. Per-session drafts mean the switch loses no input;
         // shouldAutoFocus only holds off while the user is mid-draft.
+        let sorted = sessions.sorted(by: { $0.startTime > $1.startTime })
         let newSession = sorted.first { !previousPIDs.contains($0.pid) }
         if let newSession, shouldAutoFocus(newSession.pid) {
-            switchTo(newSession.pid)
-        } else if let pid = currentPID ?? targetPID {
-            selectPicker(pid)
+            switchTo(newSession.pid) // sets currentPID + refreshes the label
+        } else {
+            updateSessionLabel(targetPID: targetPID)
         }
+    }
+
+    /// Refresh the footer indicator to name the session we're on — `currentPID`
+    /// if set, else the supplied target, else the newest. The tty is appended
+    /// ONLY when two sessions share a folder, so the right one is identifiable.
+    private func updateSessionLabel(targetPID: pid_t?) {
+        guard !sessions.isEmpty else {
+            sessionLabel.stringValue = "→ no Claude Code session"
+            return
+        }
+        let grouped = Dictionary(grouping: sessions, by: { Self.sessionName(for: $0) })
+        func label(for s: ClaudeSession) -> String {
+            let name = Self.sessionName(for: s)
+            if (grouped[name]?.count ?? 0) > 1 {
+                return "\(name) (\((s.ttyPath as NSString).lastPathComponent))"
+            }
+            return name
+        }
+        let pid = currentPID ?? targetPID
+        let session = sessions.first(where: { $0.pid == pid })
+            ?? sessions.max(by: { $0.startTime < $1.startTime })
+        guard let session else { return }
+        sessionLabel.stringValue = "→ claude · \(label(for: session))"
     }
 
     /// Whether a newly-detected session should steal the composer's selection.
@@ -701,14 +705,6 @@ final class ComposerWindow: NSWindow {
     private func shouldAutoFocus(_ pid: pid_t) -> Bool {
         guard pid != currentPID else { return false }
         return !(isVisible && !textView.string.isEmpty)
-    }
-
-    @objc private func sessionPickerChanged(_ sender: NSPopUpButton) {
-        guard let pidNumber = sender.selectedItem?.representedObject as? NSNumber
-        else { return }
-        let pid = pid_t(pidNumber.int32Value)
-        switchTo(pid)            // swap to that session's draft
-        onSessionSelected?(pid)
     }
 
     // MARK: - Session following & per-session drafts
@@ -724,29 +720,39 @@ final class ComposerWindow: NSWindow {
         refreshDictateButton()
         textView.suggestion = nil
         clearGrammar() // the previous session's suggestions don't apply to this draft
-        selectPicker(pid)
+        updateSessionLabel(targetPID: pid)
         let end = (textView.string as NSString).length
         textView.setSelectedRange(NSRange(location: end, length: 0))
         // Re-review the draft we just switched to (no-op if it's empty).
         if !textView.string.isEmpty { updateGrammar() }
     }
 
-    private func selectPicker(_ pid: pid_t) {
-        if let item = sessionPicker.itemArray.first(where: {
-            ($0.representedObject as? NSNumber)?.int32Value == pid
-        }) {
-            sessionPicker.select(item)
-        }
-    }
-
-    /// Poll Warp's focused tab; follow it only when the title actually changes,
-    /// so a manual dropdown pick isn't immediately overridden by the poll.
+    /// Poll Warp's focused tab; act only when the title actually changes. The send
+    /// always lands in Warp's frontmost tab, so the footer mirrors that tab's
+    /// title — even if it has no claude session — so the label always names where
+    /// Enter will go. When the tab maps to a known claude session we also swap to
+    /// that session's draft.
     @objc private func followTick() {
         let title = WarpInspector.focusedWindowTitle()
         guard title != lastWarpTitle else { return }
         lastWarpTitle = title
-        guard let title, let pid = sessionMatching(warpTitle: title) else { return }
-        switchTo(pid)
+        if Self.debug { fputs("TypeFlow: followTick warpTitle=\(title ?? "nil")\n", stderr) }
+        if let title, let pid = sessionMatching(warpTitle: title) {
+            switchTo(pid)
+        } else {
+            setSessionLabel(warpTitle: title)
+        }
+    }
+
+    /// Show where the send will land — the live Warp tab title — for a tab that
+    /// doesn't map to a detected claude session. Keeps the footer honest about
+    /// routing instead of leaving a stale name from the previous tab.
+    private func setSessionLabel(warpTitle: String?) {
+        if let t = warpTitle, !t.isEmpty {
+            sessionLabel.stringValue = "→ \(t)"
+        } else {
+            updateSessionLabel(targetPID: nil)
+        }
     }
 
     /// Match Warp's window title to a session. Warp prettifies titles — it
@@ -757,15 +763,23 @@ final class ComposerWindow: NSWindow {
     private func sessionMatching(warpTitle: String) -> pid_t? {
         let t = Self.normalize(warpTitle)
         guard !t.isEmpty else { return nil }
-        if let s = sessions.first(where: {
+        // Basename match (tightest). Auto-follow only when EXACTLY one session's
+        // folder matches the title; if two `claude` sessions share a folder the
+        // title can't tell them apart, so we return nil and let the user's manual
+        // dropdown pick stand instead of swapping to an arbitrary one.
+        let byLeaf = sessions.filter {
             guard let cwd = $0.cwd else { return false }
             return Self.normalize((cwd as NSString).lastPathComponent) == t
-        }) { return s.pid }
-        if let s = sessions.first(where: {
+        }
+        if byLeaf.count > 1 { return nil }
+        if let s = byLeaf.first { return s.pid }
+        // Ancestor-path fallback, same one-or-none rule.
+        let byAncestor = sessions.filter {
             guard let cwd = $0.cwd else { return false }
             return (cwd as NSString).pathComponents.contains { Self.normalize($0) == t }
-        }) { return s.pid }
-        return nil
+        }
+        if byAncestor.count > 1 { return nil }
+        return byAncestor.first?.pid
     }
 
     private static func normalize(_ s: String) -> String {

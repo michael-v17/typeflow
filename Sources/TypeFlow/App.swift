@@ -23,11 +23,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         composer = ComposerWindow { [weak self] text, dictated in
             self?.sendToClaude(text, dictated: dictated) ?? false
         }
-        composer.onSessionSelected = { [weak self] pid in
-            self?.watcher.preferredPID = pid
-            self?.refreshStatus(sessions: self?.watcher.sessions ?? [])
-        }
-
         watcher = ProcessWatcher()
         watcher.onChange = { [weak self] sessions in
             self?.refreshStatus(sessions: sessions)
@@ -139,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // writing into the claude PTY directly. Rich Input handles paste /
         // edit / submit natively, so we sidestep every claude-CLI input quirk.
         // Side effect: we send to whichever Warp tab is frontmost, not to a
-        // specific tty — the session picker is now a visual indicator only.
+        // specific tty — the footer label is a read-only indicator of that tab.
         // (Full session-aware tab focusing is a future AX-traversal task.)
         do {
             try WarpInjector.send(text, dictated: dictated)
