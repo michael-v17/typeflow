@@ -671,7 +671,12 @@ final class ComposerWindow: NSWindow {
         let newSession = sorted.first { !previousPIDs.contains($0.pid) }
         if let newSession, shouldAutoFocus(newSession.pid) {
             switchTo(newSession.pid) // sets currentPID + refreshes the label
-        } else {
+        } else if !isVisible {
+            // While the composer is open, followTick owns the label (it tracks
+            // the frontmost Warp tab — where the send actually lands). Writing it
+            // here too would fight that 0.4s loop and flicker a wrong name when
+            // the frontmost tab isn't the current session. Only set it when the
+            // composer is closed, so it's correct the moment it opens.
             updateSessionLabel(targetPID: targetPID)
         }
     }
@@ -734,10 +739,18 @@ final class ComposerWindow: NSWindow {
     /// that session's draft.
     @objc private func followTick() {
         let title = WarpInspector.focusedWindowTitle()
-        guard title != lastWarpTitle else { return }
+        // Re-resolve EVERY tick, not just when the title string changes: a new
+        // `claude` session can start under an UNCHANGED Warp title (you switch to
+        // a tab, then run claude in it). If we early-returned on an unchanged
+        // title, the label would stay stuck on the raw tab name and never upgrade
+        // to "claude · <name>" once the session appears. switchTo / setSessionLabel
+        // are both idempotent, so re-running when nothing changed is a no-op.
+        let matched = title.flatMap { sessionMatching(warpTitle: $0) }
+        if Self.debug && title != lastWarpTitle {
+            fputs("TypeFlow: followTick warpTitle=\(title ?? "nil")\n", stderr)
+        }
         lastWarpTitle = title
-        if Self.debug { fputs("TypeFlow: followTick warpTitle=\(title ?? "nil")\n", stderr) }
-        if let title, let pid = sessionMatching(warpTitle: title) {
+        if let pid = matched {
             switchTo(pid)
         } else {
             setSessionLabel(warpTitle: title)

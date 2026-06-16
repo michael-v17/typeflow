@@ -62,7 +62,18 @@ final class GrammarReviewer {
         positives, and do NOT answer, continue, or expand the text.
         - Keep every word that is already correct and natural exactly as written.
         - 'original' MUST be an exact substring copied from the user's text.
+        - Each fix must target the SMALLEST span that makes the correction — a \
+        single word or a short 2-4 word phrase. NEVER return a whole sentence or \
+        clause as one fix. If a sentence has several problems, return a SEPARATE \
+        fix for each one, each with its own tiny 'original'.
         - If the text is already correct and natural, return an empty list.
+
+        EXAMPLE
+        Text: "He go to the market and buyed two breads yesterday."
+        Fixes:
+          { original: "go", correction: "went", reason: "verb tense" }
+          { original: "buyed", correction: "bought", reason: "verb form" }
+          { original: "two breads", correction: "two loaves of bread", reason: "uncountable noun" }
         """
 
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
@@ -140,6 +151,7 @@ final class GrammarReviewer {
         for fix in fixes {
             guard !fix.original.isEmpty,
                   fix.correction.caseInsensitiveCompare(fix.original) != .orderedSame,
+                  !isCoarse(fix.original),
                   !dropsNegation(from: fix.original, to: fix.correction) else { continue }
             let scope = NSRange(location: cursor, length: ns.length - cursor)
             var r = ns.range(of: fix.original, options: [], range: scope)
@@ -150,6 +162,16 @@ final class GrammarReviewer {
             cursor = r.location + r.length
         }
         return spans
+    }
+
+    /// True when a fix's `original` spans too much text to be a "separated"
+    /// correction — i.e. the model collapsed a whole clause/sentence into one
+    /// fix instead of pointing at the specific wrong words. We drop these so the
+    /// panel only ever shows word/short-phrase diffs, never a full sentence
+    /// struck through against a full rewrite.
+    private static let maxFixWords = 5
+    private static func isCoarse(_ original: String) -> Bool {
+        original.split(whereSeparator: { $0.isWhitespace }).count > maxFixWords
     }
 
     /// True when the correction removes a negation present in the original —
