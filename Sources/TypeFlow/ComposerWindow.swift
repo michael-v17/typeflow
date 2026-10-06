@@ -16,7 +16,7 @@ final class ComposerWindow: NSWindow {
     /// the grammar suggestions. Scrolls when the coaching runs long.
     private let coach = EnglishCoach()
     private enum CoachState {
-        case loading(draft: String)
+        case loading(draft: String, deep: Bool)
         case result(CoachResult, draft: String)
         case failed(String)
     }
@@ -254,7 +254,7 @@ final class ComposerWindow: NSWindow {
         keepOpenCheckbox.target = self
         keepOpenCheckbox.action = #selector(keepOpenToggled(_:))
         keepOpenCheckbox.state = keepOpen ? .on : .off
-        keepOpenCheckbox.toolTip = "Enter sends without closing the composer"
+        keepOpenCheckbox.toolTip = "Sending (↵) or copying (⌘⇧C) clears the draft without closing the composer"
 
         dictateButton.translatesAutoresizingMaskIntoConstraints = false
         dictateButton.isBordered = false
@@ -928,21 +928,28 @@ final class ComposerWindow: NSWindow {
 
     /// Ask the coach about the current draft. Runs only on demand — each check
     /// costs Codex quota — and shows a loading row until the answer lands.
+    /// ⌘K on a draft that already has a quick result re-checks it with the deeper
+    /// (more natural, more expensive) model — the user decides when it's worth it.
     private func startCoach() {
         let draft = textView.string
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             NSSound.beep(); return
         }
+        var deep = false
+        if case .result(let r, let d) = coachState, d == draft {
+            guard r.model != EnglishCoach.deepModel else { NSSound.beep(); return } // already deep
+            deep = true
+        }
         textView.suggestion = nil
         ghostCompleter.cancel()
         clearGrammar() // the coach covers grammar too; one panel at a time
         coachTask?.cancel()
-        coachState = .loading(draft: draft)
+        coachState = .loading(draft: draft, deep: deep)
         renderCoach()
         coachTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await self.coach.check(draft)
+                let result = try await self.coach.check(draft, deep: deep)
                 guard !Task.isCancelled, self.textView.string == draft else { return }
                 self.coachState = .result(result, draft: draft)
             } catch is CancellationError {
@@ -975,12 +982,13 @@ final class ComposerWindow: NSWindow {
         switch coachState {
         case nil:
             break
-        case .loading:
+        case .loading(_, let deep):
             let spinner = NSProgressIndicator()
             spinner.style = .spinning
             spinner.controlSize = .small
             spinner.startAnimation(nil)
-            let label = coachLabel("Checking your English with Codex…", size: 12, color: .secondaryLabelColor)
+            let label = coachLabel(deep ? "Rewriting more naturally (deeper check)…" : "Checking your English with Codex…",
+                                   size: 12, color: .secondaryLabelColor)
             let row = NSStackView(views: [spinner, label])
             row.spacing = 8
             rows.append(row)
@@ -990,14 +998,16 @@ final class ComposerWindow: NSWindow {
             hint = "↵ send   ⌘⇧C copy   ⌘K retry   ⎋ close panel"
         case .result(let r, _):
             rows += coachRows(r, width: width)
+            let deeper = r.model == EnglishCoach.deepModel ? "" : "   ⌘K deeper"
             hint = r.isClean ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
-                : r.isTranslation ? "↵ send English   ⌥↵ send mine   ⌘⇧C copy   ⎋ edit"
-                : "↵ send corrected   ⌥↵ send mine   ⌘⇧C copy   ⎋ edit"
+                : r.isTranslation ? "↵ send English   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
+                : "↵ send corrected   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
         }
 
         for row in rows { coachStack.addArrangedSubview(row) }
         coachScroll.isHidden = rows.isEmpty
         hintLabel.stringValue = hint
+        hintLabel.textColor = .tertiaryLabelColor // a pending "✓ Copied" flash ends here
 
         // Measure the stack at the panel's width, cap it, and grow the window.
         coachStack.layoutSubtreeIfNeeded()
@@ -1018,7 +1028,12 @@ final class ComposerWindow: NSWindow {
         let scoreText = r.score.map { "Score \($0)/100" } ?? "Translation from Spanish"
         let scoreColor: NSColor = r.isTranslation ? .controlAccentColor
             : r.score! >= 90 ? .systemGreen : r.score! >= 70 ? .systemOrange : .systemRed
-        rows.append(coachLabel(scoreText, size: 12, weight: .semibold, color: scoreColor))
+        let deepTag = r.model == EnglishCoach.deepModel ? "   · deeper check" : ""
+        rows.append(coachLabel(scoreText + deepTag, size: 12, weight: .semibold, color: scoreColor))
+        if !r.intent.isEmpty {
+            // The coach's reading of the draft — if it's wrong, the rewrite is too.
+            rows.append(coachLabel("Understood: " + r.intent, size: 12, color: .secondaryLabelColor, width: width))
+        }
 
         if r.isClean {
             rows.append(coachLabel("✓ Sounds natural. No changes needed.", size: 13, color: .systemGreen, width: width))
@@ -1132,8 +1147,9 @@ final class ComposerWindow: NSWindow {
 
     /// ⌘⇧C: put the text on the clipboard instead of sending it to Claude — for a
     /// quick correction to paste into another app. Same choice as Enter (the
-    /// coach's version when there's a correction, else the draft), then the
-    /// composer closes so focus returns to that app, ready for ⌘V.
+    /// coach's version when there's a correction, else the draft). Like a send,
+    /// the draft clears; with "keep open" on the composer stays up for the next
+    /// one, otherwise it closes so focus returns to the previous app.
     private func copyForElsewhere() {
         let (raw, coach, corrected): (String, CoachResult?, Bool)
         switch coachState {
@@ -1155,7 +1171,23 @@ final class ComposerWindow: NSWindow {
             dictated: liveDictated, coach: coach, corrected: corrected,
             cwd: nil, destination: .clipboard))
         clear()
-        hide()
+        if keepOpen {
+            makeFirstResponder(textView)
+            flashHint("✓ Copied — paste it anywhere with ⌘V")
+        } else {
+            hide()
+        }
+    }
+
+    /// Briefly replace the footer hint with a confirmation, then restore it.
+    private func flashHint(_ message: String) {
+        hintLabel.stringValue = message
+        hintLabel.textColor = .systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.hintLabel.stringValue == message else { return }
+            self.hintLabel.textColor = .tertiaryLabelColor
+            self.hintLabel.stringValue = Self.defaultHint
+        }
     }
 
     /// The coach's result, if it was computed for exactly the visible draft.

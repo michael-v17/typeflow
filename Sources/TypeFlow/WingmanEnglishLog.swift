@@ -92,7 +92,7 @@ enum WingmanEnglishLog {
             destination: send.destination,
             modality: send.dictated ? "spoken" : "written",
             draft: send.draft, sentText: send.text, coach: coach,
-            coachModel: EnglishCoach.modelName)
+            coachModel: coach.model)
         do {
             let dir = vault.appendingPathComponent("corpus/typeflow", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
