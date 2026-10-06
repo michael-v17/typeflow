@@ -40,9 +40,9 @@ private struct GrammarReview {
 @MainActor
 final class GrammarReviewer {
     private let model = SystemLanguageModel.default
+    /// The latest review. Each new review cancels it and awaits it before calling
+    /// the model, so at most one review call is in flight.
     private var task: Task<Void, Never>?
-    /// Guards against overlapping model calls (the completer hits the model too).
-    private var busy = false
 
     /// Don't bother reviewing until there's a sentence's worth of text.
     private let minChars = 8
@@ -96,22 +96,23 @@ final class GrammarReviewer {
     /// Debounced, cancel-on-keystroke review. `show` is called on the main actor
     /// with the located spans (or [] to clear).
     func review(_ text: String, show: @escaping ([GrammarSpan]) -> Void) {
-        task?.cancel()
+        let previous = task
+        previous?.cancel()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isAvailable, trimmed.count >= minChars else {
             if Self.debug { fputs("TypeFlow: review skip (avail=\(isAvailable) len=\(trimmed.count))\n", stderr) }
+            task = nil
             show([]); return
         }
 
         task = Task {
             try? await Task.sleep(for: debounce)
             guard !Task.isCancelled else { return }
-            guard !busy else {
-                if Self.debug { fputs("TypeFlow: review skip (busy)\n", stderr) }
-                return
-            }
-            busy = true
-            defer { busy = false }
+            // Let a cancelled in-flight model call wind down instead of skipping:
+            // the old `busy` guard dropped the newest review whenever the previous
+            // call was still running, so the panel stayed empty with no retry.
+            await previous?.value
+            guard !Task.isCancelled else { return }
             // Fresh session per request: a reused session accumulates transcript
             // and blows the 4096-token context window after ~a dozen calls.
             let session = LanguageModelSession(instructions: instructions)

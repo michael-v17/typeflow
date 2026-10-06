@@ -10,9 +10,9 @@ import FoundationModels
 @MainActor
 final class GhostCompleter {
     private let model = SystemLanguageModel.default
+    /// The latest request. Each new request cancels it and awaits it before
+    /// calling the model, so at most one completion call is in flight.
     private var task: Task<Void, Never>?
-    /// Guards against overlapping model calls (grammar review hits the model too).
-    private var busy = false
 
     /// Minimum prefix length before we bother asking for a completion.
     private let minPrefix = 4
@@ -77,15 +77,18 @@ final class GhostCompleter {
     /// a display-ready suggestion (leading space added when continuing
     /// mid-sentence), or "" to clear.
     func requestCompletion(prefix: String, show: @escaping (String) -> Void) {
-        task?.cancel()
+        let previous = task
+        previous?.cancel()
         let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isAvailable, trimmed.count >= minPrefix else { show(""); return }
+        guard isAvailable, trimmed.count >= minPrefix else { task = nil; show(""); return }
 
         task = Task {
             try? await Task.sleep(for: debounce)
-            guard !Task.isCancelled, !busy else { return }
-            busy = true
-            defer { busy = false }
+            guard !Task.isCancelled else { return }
+            // Wait for a cancelled in-flight call instead of skipping (skipping
+            // dropped the newest request with no retry).
+            await previous?.value
+            guard !Task.isCancelled else { return }
             // Fresh session per request — a reused session accumulates transcript
             // and overflows the context window after a dozen-ish calls.
             let session = LanguageModelSession(instructions: instructions)
