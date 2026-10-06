@@ -9,7 +9,7 @@ import Carbon.HIToolbox
 ///
 /// Mechanism:
 ///   1. Activate Warp.
-///   2. ⌃G to open Rich Input. (⌃G *toggles* Rich Input in Warp; because we
+///   2. ⌃G to open Rich Input (posted to Warp's pid so global hotkeys can't steal it). (⌃G *toggles* Rich Input in Warp; because we
 ///      close it again after every submit, it's reliably closed when we get
 ///      here, so this press reliably opens it.)
 ///   3. Put text on the pasteboard.
@@ -26,6 +26,7 @@ enum WarpInjector {
     enum InjectError: Error, CustomStringConvertible {
         case noAccessibilityPermission
         case warpNotRunning
+        case warpNotFrontmost
 
         var description: String {
             switch self {
@@ -34,6 +35,8 @@ enum WarpInjector {
                        "Grant it in System Settings → Privacy & Security → Accessibility."
             case .warpNotRunning:
                 return "Warp doesn't appear to be running."
+            case .warpNotFrontmost:
+                return "Warp didn't come to the front, so nothing was sent. Your draft is still here — try again."
             }
         }
     }
@@ -46,7 +49,11 @@ enum WarpInjector {
     ]
 
     /// Delays tuned to give Warp time to open Rich Input and process the paste.
-    private static let postActivateMicros: UInt32 = 60_000  // 60ms
+    private static let postActivateMicros: UInt32 = 60_000  // 60ms, once Warp is confirmed frontmost
+    /// Upper bounds for the two waits before any keystroke is synthesized.
+    private static let modifierReleaseTimeout: TimeInterval = 1.0
+    private static let activationTimeout: TimeInterval = 1.0
+    private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private static let postRichInputMicros: UInt32 = 150_000 // 150ms — opening RI takes a beat
     private static let postPasteMicros: UInt32 = 80_000     // 80ms
     private static let postSubmitMicros: UInt32 = 80_000    // 80ms before restoring pasteboard
@@ -81,9 +88,23 @@ enum WarpInjector {
             throw InjectError.warpNotRunning
         }
 
-        // 1. Activate Warp.
+        // 0. Wait for the user to let go of modifiers (e.g. ⌥ from ⌥↵). A held
+        //    key merges into our synthetic events: ⌃G becomes ⌃⌥G and ↵ becomes
+        //    ⌥↵ (a newline in claude), so the prompt never submits.
+        waitForModifierRelease()
+
+        // 1. Activate Warp, and CONFIRM it's frontmost before typing anything.
+        //    macOS 14+ activation is cooperative: we yield first, and a fixed
+        //    sleep isn't enough — if Warp isn't in front, the keystrokes land
+        //    back in TypeFlow and the prompt is silently lost.
+        NSApp.yieldActivation(to: warp)
         warp.activate(options: [])
+        guard waitUntilFrontmost(warp) else {
+            log("send aborted: frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil")")
+            throw InjectError.warpNotFrontmost
+        }
         usleep(postActivateMicros)
+        log("send: Warp frontmost, injecting \(text.count) chars")
 
         // 2. Stash and replace pasteboard.
         let pb = NSPasteboard.general
@@ -95,23 +116,23 @@ enum WarpInjector {
         pb.setString(prefix + text, forType: .string)
 
         // 3. ⌃G — open Rich Input.
-        sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl)
+        sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl, to: warp)
         usleep(postRichInputMicros)
 
         // 4. ⌘V — paste.
-        sendKey(keyCode: UInt16(kVK_ANSI_V), modifiers: .maskCommand)
+        sendKey(keyCode: UInt16(kVK_ANSI_V), modifiers: .maskCommand, to: warp)
         usleep(postPasteMicros)
 
         // 5. ↵ — submit.
         if autoSubmit {
-            sendKey(keyCode: UInt16(kVK_Return), modifiers: [])
+            sendKey(keyCode: UInt16(kVK_Return), modifiers: [], to: warp)
             usleep(postSubmitMicros)
 
             // 6. ⌃G again — close Rich Input so keyboard focus returns to
             //    claude's TUI. Warp's ⌃G toggles Rich Input (show/hide) and it
             //    stays open after a submit, otherwise swallowing the keys claude
             //    expects for its interactive prompts (arrow-key menus, y/n).
-            sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl)
+            sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl, to: warp)
             usleep(postRichInputMicros)
         }
 
@@ -124,6 +145,31 @@ enum WarpInjector {
 
     // MARK: - Helpers
 
+    private static func waitForModifierRelease() {
+        let held: CGEventFlags = [.maskAlternate, .maskCommand, .maskControl, .maskShift]
+        let deadline = Date().addingTimeInterval(modifierReleaseTimeout)
+        while !CGEventSource.flagsState(.hidSystemState).intersection(held).isEmpty,
+              Date() < deadline {
+            usleep(10_000)
+        }
+    }
+
+    private static func waitUntilFrontmost(_ app: NSRunningApplication) -> Bool {
+        let deadline = Date().addingTimeInterval(activationTimeout)
+        while Date() < deadline {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+                return true
+            }
+            // Let the run loop deliver the activation notifications.
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        return false
+    }
+
+    private static func log(_ message: String) {
+        if debug { fputs("TypeFlow: \(message)\n", stderr) }
+    }
+
     private static func findWarp() -> NSRunningApplication? {
         for id in warpBundleIDs {
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first {
@@ -133,7 +179,11 @@ enum WarpInjector {
         return nil
     }
 
-    private static func sendKey(keyCode: UInt16, modifiers: CGEventFlags) {
+    /// Posts the key straight to Warp's process rather than the system-wide HID
+    /// stream. Global hotkeys only see the HID stream, so another app's shortcut
+    /// can't steal the keystroke (the Gemini app grabs ⌃G globally, which sent
+    /// our prompts to Gemini instead of Warp's Rich Input).
+    private static func sendKey(keyCode: UInt16, modifiers: CGEventFlags, to app: NSRunningApplication) {
         let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src,
                                  virtualKey: keyCode, keyDown: true),
@@ -142,7 +192,7 @@ enum WarpInjector {
         else { return }
         down.flags = modifiers
         up.flags = modifiers
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        down.postToPid(app.processIdentifier)
+        up.postToPid(app.processIdentifier)
     }
 }
