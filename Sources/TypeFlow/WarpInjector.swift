@@ -58,20 +58,6 @@ enum WarpInjector {
     private static let postPasteMicros: UInt32 = 80_000     // 80ms
     private static let postSubmitMicros: UInt32 = 80_000    // 80ms before restoring pasteboard
 
-    /// Provenance marker prepended to every injected message so the MyProject
-    /// observer can tell a TypeFlow-composed message (already reviewed pre-submit)
-    /// from one typed raw into the terminal. Cross-repo contract: MUST stay
-    /// identical to the prefix in
-    /// the observer's origin-prefix module (`detectOrigin`).
-    private static let provenancePrefix = ";;tf "
-
-    /// Voice marker, appended after `provenancePrefix` when the draft was dictated,
-    /// so the observer's voice path (dictation-misrecognition + naturalness
-    /// analysis) fires. Mirrors the observer's ";;v " convention
-    /// (voice-prefix.mjs / `detectVoice`). Order matters: the observer strips
-    /// ";;tf " first, then ";;v ".
-    private static let voicePrefix = ";;v "
-
     /// Returns true if Accessibility is already granted; otherwise triggers
     /// the system prompt (only on first call) and returns false.
     static func checkAccessibility(prompt: Bool = true) -> Bool {
@@ -80,7 +66,9 @@ enum WarpInjector {
         return AXIsProcessTrustedWithOptions(opts)
     }
 
-    static func send(_ text: String, autoSubmit: Bool = true, dictated: Bool = false) throws {
+    /// `marker` is prepended to the pasted text (see `ComposerSend.marker`) — the
+    /// provenance prefixes wingman-english's capture hook reads.
+    static func send(_ text: String, autoSubmit: Bool = true, marker: String = "") throws {
         guard checkAccessibility(prompt: true) else {
             throw InjectError.noAccessibilityPermission
         }
@@ -110,10 +98,7 @@ enum WarpInjector {
         let pb = NSPasteboard.general
         let savedString = pb.string(forType: .string)
         pb.clearContents()
-        // ";;tf " marks TypeFlow provenance; ";;v " is added when the draft was
-        // dictated so the observer runs its voice analysis on it.
-        let prefix = dictated ? provenancePrefix + voicePrefix : provenancePrefix
-        pb.setString(prefix + text, forType: .string)
+        pb.setString(marker + text, forType: .string)
 
         // 3. ⌃G — open Rich Input.
         sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl, to: warp)

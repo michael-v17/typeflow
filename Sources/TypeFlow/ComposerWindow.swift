@@ -34,8 +34,7 @@ final class ComposerWindow: NSWindow {
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
     private let dictateButton = NSButton()
     /// Returns true if the send succeeded; on false the composer keeps its text.
-    /// Second arg: whether this draft was dictated (→ send carries the ;;v marker).
-    private var onSubmit: ((String, Bool) -> Bool)?
+    private var onSubmit: ((ComposerSend) -> Bool)?
     private let textDelegate = ComposerTextDelegate()
 
     /// Called when the composer is shown / hidden, so the app can speed up or
@@ -58,8 +57,8 @@ final class ComposerWindow: NSWindow {
     private var sessions: [ClaudeSession] = []
     private var drafts: [pid_t: String] = [:]
     /// Per-session "this draft was dictated" flag, parallel to `drafts`. When set,
-    /// the send carries the ;;v voice marker so the observer runs its
-    /// dictation-misrecognition + naturalness analysis. Conservative: once the mic
+    /// the send carries the ;;v marker, so wingman-english reads it as spoken
+    /// (misrecognition, not grammar). Conservative: once the mic
     /// is used for a draft, the whole send is treated as voice.
     private var draftsDictated: [pid_t: Bool] = [:]
     /// Live dictated flag for the visible draft (mirrors draftsDictated[currentPID],
@@ -74,7 +73,7 @@ final class ComposerWindow: NSWindow {
     private var tabNames: [pid_t: String] = [:]
     private var followTimer: Timer?
 
-    init(onSubmit: @escaping (String, Bool) -> Bool) {
+    init(onSubmit: @escaping (ComposerSend) -> Bool) {
         self.onSubmit = onSubmit
         // .titled (not .borderless) — Apple Intelligence's inline prediction
         // service appears to require a titled-window class to attach the
@@ -988,11 +987,12 @@ final class ComposerWindow: NSWindow {
             hint = "⌥↵ send without waiting   ⎋ cancel"
         case .failed(let message):
             rows.append(coachLabel("Couldn't check: \(message)", size: 12, color: .systemRed, width: width))
-            hint = "↵ send   ⌘K retry   ⎋ close panel"
+            hint = "↵ send   ⌘⇧C copy   ⌘K retry   ⎋ close panel"
         case .result(let r, _):
             rows += coachRows(r, width: width)
-            hint = r.isClean ? "↵ send   ⎋ back to edit"
-                             : "↵ send corrected   ⌥↵ send mine   ⎋ back to edit"
+            hint = r.isClean ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
+                : r.isTranslation ? "↵ send English   ⌥↵ send mine   ⌘⇧C copy   ⎋ edit"
+                : "↵ send corrected   ⌥↵ send mine   ⌘⇧C copy   ⎋ edit"
         }
 
         for row in rows { coachStack.addArrangedSubview(row) }
@@ -1015,9 +1015,9 @@ final class ComposerWindow: NSWindow {
 
     private func coachRows(_ r: CoachResult, width: CGFloat) -> [NSView] {
         var rows: [NSView] = []
-        let scoreText = r.score.map { "Score \($0)/100" } ?? "Translation"
-        let scoreColor: NSColor = (r.score ?? 100) >= 90 ? .systemGreen
-            : (r.score ?? 100) >= 70 ? .systemOrange : .systemRed
+        let scoreText = r.score.map { "Score \($0)/100" } ?? "Translation from Spanish"
+        let scoreColor: NSColor = r.isTranslation ? .controlAccentColor
+            : r.score! >= 90 ? .systemGreen : r.score! >= 70 ? .systemOrange : .systemRed
         rows.append(coachLabel(scoreText, size: 12, weight: .semibold, color: scoreColor))
 
         if r.isClean {
@@ -1094,6 +1094,10 @@ final class ComposerWindow: NSWindow {
             startCoach()
             return true
         }
+        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "c" {
+            copyForElsewhere()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -1115,26 +1119,65 @@ final class ComposerWindow: NSWindow {
         case .loading:
             NSSound.beep()
         case .result(let r, let draft) where draft == textView.string && !r.isClean:
-            send(r.native)
+            send(r.native, coach: r, corrected: true)
         default:
-            send(textView.string)
+            send(textView.string, coach: currentCoachResult, corrected: false)
         }
     }
 
     /// ⌥Enter while coaching: send the draft exactly as written.
     private func submitOriginal() {
-        send(textView.string)
+        send(textView.string, coach: currentCoachResult, corrected: false)
     }
 
-    private func send(_ raw: String) {
+    /// ⌘⇧C: put the text on the clipboard instead of sending it to Claude — for a
+    /// quick correction to paste into another app. Same choice as Enter (the
+    /// coach's version when there's a correction, else the draft), then the
+    /// composer closes so focus returns to that app, ready for ⌘V.
+    private func copyForElsewhere() {
+        let (raw, coach, corrected): (String, CoachResult?, Bool)
+        switch coachState {
+        case .loading:
+            NSSound.beep(); return
+        case .result(let r, let draft) where draft == textView.string && !r.isClean:
+            (raw, coach, corrected) = (r.native, r, true)
+        default:
+            (raw, coach, corrected) = (textView.string, currentCoachResult, false)
+        }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { NSSound.beep(); return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        WingmanEnglishLog.record(ComposerSend(
+            text: text,
+            draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            dictated: liveDictated, coach: coach, corrected: corrected,
+            cwd: nil, destination: .clipboard))
+        clear()
+        hide()
+    }
+
+    /// The coach's result, if it was computed for exactly the visible draft.
+    private var currentCoachResult: CoachResult? {
+        if case .result(let r, let draft) = coachState, draft == textView.string { return r }
+        return nil
+    }
+
+    private func send(_ raw: String, coach: CoachResult?, corrected: Bool) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             NSSound.beep()
             return
         }
+        let send = ComposerSend(
+            text: text,
+            draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            dictated: liveDictated, coach: coach, corrected: corrected,
+            cwd: sessions.first(where: { $0.pid == currentPID })?.cwd)
         // If the send failed (e.g. Warp not running), keep the text and the
         // window so the user doesn't lose their prompt.
-        guard onSubmit?(text, liveDictated) == true else { return }
+        guard onSubmit?(send) == true else { return }
         clear()
         if keepOpen {
             // The send activates Warp; re-focus the composer once it has landed
@@ -1158,7 +1201,7 @@ final class ComposerWindow: NSWindow {
     @objc private func startDictationClicked() {
         // startDictation: is the selector the system dictation shortcut invokes;
         // calling it on the focused text view starts Apple dictation in the box.
-        // Mark this draft as dictated so the send carries the ;;v voice marker and
+        // Mark this draft as dictated so the send carries the ;;v marker and
         // the observer runs its dictation-misrecognition + naturalness analysis.
         liveDictated = true
         refreshDictateButton()
