@@ -14,11 +14,12 @@ struct ComposerSend {
     let corrected: Bool
     /// The Claude session's folder, when known (nil for a clipboard copy).
     let cwd: String?
-    /// Where the text went: Claude (via Warp), or the clipboard for use elsewhere.
+    /// Where the text went: Claude (via Warp), the clipboard for use elsewhere,
+    /// or nowhere — a ⌘K check whose draft was abandoned without a send or copy.
     var destination: Destination = .claude
 
     enum Destination: String, Encodable {
-        case claude, clipboard
+        case claude, clipboard, unsent
     }
 
     /// Provenance prefixes read by wingman-english's capture hook
@@ -36,6 +37,8 @@ struct ComposerSend {
 /// user checked with ⌘K, their own draft plus the coach's analysis, appended to
 /// `<vault>/corpus/typeflow/YYYY-MM-DD.jsonl` in wingman-english's vault.
 /// (A clipboard copy never reaches Claude, so the hook has no record of it at all.)
+/// A check that is never sent or copied is logged too, once its draft is
+/// abandoned (deleted, session gone, app quit), as `destination: "unsent"`.
 ///
 /// The hook records what reached Claude; for a `;;tf+` send that's the coach's
 /// text, so without this file the learner's actual attempt would be lost.
@@ -56,16 +59,18 @@ enum WingmanEnglishLog {
         let ts: String
         let cwd: String?
         let kind = "prose"
-        /// "corrected" (sent the coach's text, `;;tf+`) or "original" (`;;tf`).
+        /// "corrected" (sent the coach's text, `;;tf+`), "original" (`;;tf`), or
+        /// "none" (unsent check).
         let sent: String
-        /// "claude" (the hook also has a raw record) or "clipboard" (it doesn't).
+        /// "claude" (the hook also has a raw record), "clipboard" or "unsent" (it doesn't).
         let destination: Send.Destination
         let modality: String
         /// The draft was typed in TypeFlow (Apple autocorrect + live underlines),
         /// so it is assisted, never `self` — same class as a `;;tf` message.
         let authorship = "assisted"
         let draft: String
-        let sentText: String
+        /// Omitted for an unsent check — nothing went anywhere.
+        let sentText: String?
         let coach: CoachResult
         let coachModel: String
 
@@ -86,10 +91,10 @@ enum WingmanEnglishLog {
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let record = Record(
             ts: iso.string(from: Date()), cwd: send.cwd,
-            sent: send.corrected ? "corrected" : "original",
+            sent: send.destination == .unsent ? "none" : send.corrected ? "corrected" : "original",
             destination: send.destination,
             modality: send.dictated ? "spoken" : "written",
-            draft: send.draft, sentText: send.text, coach: coach,
+            draft: send.draft, sentText: send.destination == .unsent ? nil : send.text, coach: coach,
             coachModel: coach.model)
         do {
             let dir = vault.appendingPathComponent("corpus/typeflow", isDirectory: true)

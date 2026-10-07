@@ -17,6 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hotKey: HotKey!
     var statusItem: NSStatusItem!
 
+    func applicationWillTerminate(_ notification: Notification) {
+        composer.flushUnsentChecks()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 

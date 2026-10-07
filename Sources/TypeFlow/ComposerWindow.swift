@@ -21,6 +21,9 @@ final class ComposerWindow: NSWindow {
         case failed(String)
     }
     private var coachState: CoachState?
+    /// The latest ⌘K check per session that hasn't been sent or copied yet.
+    /// Logged as unsent once its draft is abandoned; dropped on send/copy.
+    private var unsentChecks: [pid_t: ComposerSend] = [:]
     private var coachTask: Task<Void, Never>?
     private let coachScroll = NSScrollView()
     private let coachStack = NSStackView()
@@ -463,6 +466,7 @@ final class ComposerWindow: NSWindow {
     /// finished word), then refresh the word-completion ghost.
     private func handleTextChange() {
         dismissCoach() // coaching describes the old text; editing returns to the draft
+        if textView.string.isEmpty { flushUnsentCheck(for: currentPID ?? 0) } // draft abandoned
         autocorrectContraction()
         updateGhost()
         updateGrammar()
@@ -718,6 +722,7 @@ final class ComposerWindow: NSWindow {
         self.sessions = sessions
         // Forget drafts for sessions that no longer exist.
         let alive = Set(sessions.map { $0.pid })
+        for pid in unsentChecks.keys where pid != 0 && !alive.contains(pid) { flushUnsentCheck(for: pid) }
         drafts = drafts.filter { alive.contains($0.key) }
         tabNames = tabNames.filter { alive.contains($0.key) }
         draftsDictated = draftsDictated.filter { alive.contains($0.key) }
@@ -980,6 +985,12 @@ final class ComposerWindow: NSWindow {
                 let result = try await self.coach.check(draft, deep: deep)
                 guard !Task.isCancelled, self.textView.string == draft else { return }
                 self.coachState = .result(result, draft: draft)
+                self.unsentChecks[self.currentPID ?? 0] = ComposerSend(
+                    text: result.native,
+                    draft: draft.trimmingCharacters(in: .whitespacesAndNewlines),
+                    dictated: self.liveDictated, coach: result, corrected: false,
+                    cwd: self.sessions.first(where: { $0.pid == self.currentPID })?.cwd,
+                    destination: .unsent)
             } catch is CancellationError {
                 return
             } catch {
@@ -988,6 +999,17 @@ final class ComposerWindow: NSWindow {
             }
             self.renderCoach()
         }
+    }
+
+    /// Log a session's pending ⌘K check as unsent — its draft won't be sent.
+    private func flushUnsentCheck(for pid: pid_t) {
+        guard let check = unsentChecks.removeValue(forKey: pid) else { return }
+        WingmanEnglishLog.record(check)
+    }
+
+    /// App quit: every pending check is abandoned.
+    func flushUnsentChecks() {
+        for pid in Array(unsentChecks.keys) { flushUnsentCheck(for: pid) }
     }
 
     private func dismissCoach() {
@@ -1259,6 +1281,7 @@ final class ComposerWindow: NSWindow {
             draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
             dictated: liveDictated, coach: coach, corrected: corrected,
             cwd: nil, destination: .clipboard))
+        unsentChecks[currentPID ?? 0] = nil
         clear()
         if keepOpen {
             makeFirstResponder(textView)
@@ -1299,6 +1322,7 @@ final class ComposerWindow: NSWindow {
         // If the send failed (e.g. Warp not running), keep the text and the
         // window so the user doesn't lose their prompt.
         guard onSubmit?(send) == true else { return }
+        unsentChecks[currentPID ?? 0] = nil
         clear()
         if keepOpen {
             // The send activates Warp; re-focus the composer once it has landed
