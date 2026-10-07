@@ -30,6 +30,27 @@ final class GhostTextView: NSTextView {
     /// Replace the underlined grammar spans and refresh the hover tooltips that
     /// preview each suggestion. Spans whose range falls outside the buffer are
     /// dropped (stale after an edit).
+    /// Marks what the coach removed, in place: red and struck through. Temporary
+    /// attributes are display-only — the text, its undo stack, and what gets sent
+    /// are untouched. Pass [] to clear.
+    func setCoachRemovals(_ ranges: [(range: NSRange, slip: Bool)]) {
+        guard let lm = layoutManager else { return }
+        let length = textStorage?.length ?? 0
+        let all = NSRange(location: 0, length: length)
+        lm.removeTemporaryAttribute(.strikethroughStyle, forCharacterRange: all)
+        lm.removeTemporaryAttribute(.strikethroughColor, forCharacterRange: all)
+        lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: all)
+        // Yellow = a slip (capitals, punctuation); red = a language error.
+        for (r, slip) in ranges where NSMaxRange(r) <= length {
+            let color = slip ? TrackChanges.slipColor : NSColor.systemRed
+            lm.addTemporaryAttributes([
+                .foregroundColor: color,
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .strikethroughColor: color,
+            ], forCharacterRange: r)
+        }
+    }
+
     func setGrammarSpans(_ spans: [GrammarSpan]) {
         let length = textStorage?.length ?? 0
         grammarSpans = spans.filter { NSMaxRange($0.range) <= length }

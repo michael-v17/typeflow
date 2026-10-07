@@ -925,6 +925,30 @@ final class ComposerWindow: NSWindow {
     }
 
     // MARK: - English coach (⌘K)
+    /// Debug only (`TYPEFLOW_DEMO_COACH=1`): open the composer with a canned coach
+    /// result so the panel layout can be checked (and screenshotted) without a
+    /// Codex call or a send.
+    func showDemoCoach() {
+        show()
+        let draft = "give me a markdown with the information for this lesson. Don't add extra information."
+        textView.string = draft
+        let r = CoachResult(
+            intent: "Ask for a Markdown document with this lesson's information, nothing extra.", score: 90,
+            native: "Give me a Markdown document with the information for this lesson. Don’t add anything extra.",
+            fixes: [
+                CoachFix(original: "give", correction: "Give", reason: "capitalize first word",
+                         category: "mechanics-punctuation-and-capitalization"),
+                CoachFix(original: "a markdown", correction: "a Markdown document", reason: "name the thing",
+                         category: "noun-phrase-structure"),
+                CoachFix(original: "extra information", correction: "anything extra", reason: "natural phrasing",
+                         category: "false-friends-and-calques"),
+            ],
+            why: "\"Markdown\" names the format; \"a Markdown document\" names the thing you want.",
+            pattern: "Ask for the thing, then the format: \"a Markdown document\".", spanishTransfer: "")
+        coachState = .result(r, draft: draft)
+        renderCoach()
+    }
+
 
     /// Ask the coach about the current draft. Runs only on demand — each check
     /// costs Codex quota — and shows a loading row until the answer lands.
@@ -979,6 +1003,7 @@ final class ComposerWindow: NSWindow {
         var rows: [NSView] = []
         var hint = Self.defaultHint
 
+        var removals: [(range: NSRange, slip: Bool)] = []
         switch coachState {
         case nil:
             break
@@ -996,15 +1021,22 @@ final class ComposerWindow: NSWindow {
         case .failed(let message):
             rows.append(coachLabel("Couldn't check: \(message)", size: 12, color: .systemRed, width: width))
             hint = "↵ send   ⌘⇧C copy   ⌘K retry   ⎋ close panel"
-        case .result(let r, _):
-            rows += coachRows(r, width: width)
+        case .result(let r, let draft):
+            rows += coachRows(r, draft: draft, width: width)
+            if !r.isTranslation && !r.isClean { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
             let deeper = r.model == EnglishCoach.deepModel ? "" : "   ⌘K deeper"
             hint = r.isClean ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
                 : r.isTranslation ? "↵ send English   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
                 : "↵ send corrected   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
         }
 
-        for row in rows { coachStack.addArrangedSubview(row) }
+        textView.setCoachRemovals(removals) // cleared whenever there's no result
+        for row in rows {
+            coachStack.addArrangedSubview(row)
+            // Full-width hairlines; constrained only once inside the stack (an
+            // anchor pair with no common ancestor throws — see populateGrammarPanel).
+            if row is SeparatorLine { row.widthAnchor.constraint(equalTo: coachStack.widthAnchor).isActive = true }
+        }
         coachScroll.isHidden = rows.isEmpty
         hintLabel.stringValue = hint
         hintLabel.textColor = .tertiaryLabelColor // a pending "✓ Copied" flash ends here
@@ -1023,60 +1055,113 @@ final class ComposerWindow: NSWindow {
         coachScroll.documentView?.scroll(.zero)
     }
 
-    private func coachRows(_ r: CoachResult, width: CGFloat) -> [NSView] {
+    /// The "track changes" layout: header (score + what the coach understood),
+    /// the draft with its changes marked inline, one compact line per change,
+    /// the learning line, and the plan's focus.
+    private func coachRows(_ r: CoachResult, draft: String, width: CGFloat) -> [NSView] {
         var rows: [NSView] = []
-        let scoreText = r.score.map { "Score \($0)/100" } ?? "Translation from Spanish"
-        let scoreColor: NSColor = r.isTranslation ? .controlAccentColor
-            : r.score! >= 90 ? .systemGreen : r.score! >= 70 ? .systemOrange : .systemRed
-        let deepTag = r.model == EnglishCoach.deepModel ? "   · deeper check" : ""
-        rows.append(coachLabel(scoreText + deepTag, size: 12, weight: .semibold, color: scoreColor))
+
+        let header = NSMutableAttributedString()
+        let scoreText = r.score.map { "\($0)/100" } ?? "Translation"
+        // Neutral: green/yellow/red are reserved for the changes themselves.
+        header.append(NSAttributedString(string: scoreText, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: NSColor.labelColor]))
+        if r.model == EnglishCoach.deepModel {
+            header.append(NSAttributedString(string: "  · deeper check", attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
+        }
         if !r.intent.isEmpty {
             // The coach's reading of the draft — if it's wrong, the rewrite is too.
-            rows.append(coachLabel("Understood: " + r.intent, size: 12, color: .secondaryLabelColor, width: width))
+            header.append(NSAttributedString(string: "   Understood: " + r.intent, attributes: [
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]))
         }
+        rows.append(attributedLabel(header, width: width))
 
         if r.isClean {
             rows.append(coachLabel("✓ Sounds natural. No changes needed.", size: 13, color: .systemGreen, width: width))
             return rows
         }
 
-        // The native version — what Enter sends. Selectable so it can be copied.
-        let native = coachLabel("✓ " + r.native, size: 13, weight: .medium, color: .labelColor, width: width)
-        native.isSelectable = true
-        rows.append(native)
+        // The draft is already in the text box above, with the coach's removals
+        // marked there in red (see renderCoach). The panel opens with what Enter
+        // sends: the corrected version, additions in green. A translation shares
+        // no words with the Spanish, so it's shown plain.
+        rows.append(SeparatorLine())
+        rows.append(coachLabel(r.isTranslation ? "IN ENGLISH" : "CORRECTED", size: 10, weight: .semibold,
+                               color: .tertiaryLabelColor))
+        let sides = r.isTranslation ? nil : TrackChanges.sides(from: draft, to: r.native, size: 13)
+        let corrected = sides.map { attributedLabel($0.corrected, width: width) }
+            ?? coachLabel(r.native, size: 14, weight: .medium, color: .labelColor, width: width)
+        corrected.isSelectable = true
+        rows.append(corrected)
 
-        for fix in r.fixes.prefix(8) {
-            let str = NSMutableAttributedString()
-            str.append(NSAttributedString(string: "• ", attributes: [
-                .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 12)]))
-            str.append(NSAttributedString(string: fix.original, attributes: [
-                .foregroundColor: NSColor.secondaryLabelColor,
-                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                .font: NSFont.systemFont(ofSize: 12)]))
-            str.append(NSAttributedString(string: "  →  ", attributes: [
-                .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 12)]))
-            str.append(NSAttributedString(string: fix.correction, attributes: [
-                .foregroundColor: NSColor.systemOrange, .font: NSFont.systemFont(ofSize: 12, weight: .medium)]))
-            str.append(NSAttributedString(string: "   \(fix.reason)", attributes: [
-                .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 11)]))
-            let label = NSTextField(wrappingLabelWithString: "")
-            label.attributedStringValue = str
-            label.preferredMaxLayoutWidth = width
-            rows.append(label)
+        // Plan + history from wingman-english's vault (local files, no model call).
+        let insights = CoachInsights.snapshot()
+        if !r.fixes.isEmpty {
+            rows.append(SeparatorLine())
+            rows.append(coachLabel("CHANGES", size: 10, weight: .semibold, color: .tertiaryLabelColor))
+            var seenNow: [String: Int] = [:]
+            for fix in r.fixes.prefix(8) {
+                // A severity dot (red mistake / yellow slip); the text itself stays neutral.
+                let slip = TrackChanges.slipCategories.contains(fix.category)
+                let str = NSMutableAttributedString(string: "● ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: slip ? TrackChanges.slipColor : NSColor.systemRed])
+                if fix.correction.isEmpty {
+                    str.append(NSAttributedString(string: fix.original, attributes: [
+                        .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor,
+                        .strikethroughStyle: NSUnderlineStyle.single.rawValue]))
+                } else {
+                    str.append(NSAttributedString(string: fix.correction, attributes: [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor]))
+                }
+                str.append(NSAttributedString(string: "    \(fix.reason) · \(CoachInsights.label(fix.category))", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+                if let insights {
+                    seenNow[fix.category, default: 0] += 1
+                    var badges: [String] = []
+                    if insights.targetForms.contains(fix.category) { badges.append("🎯") }
+                    let total = insights.weekCounts[fix.category, default: 0] + seenNow[fix.category]!
+                    if total >= CoachInsights.repeatThreshold, fix.category != "l1-switch" {
+                        badges.append("↻ \(CoachInsights.ordinal(total)) this week")
+                    }
+                    if !badges.isEmpty {
+                        str.append(NSAttributedString(string: "    " + badges.joined(separator: "  "), attributes: [
+                            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.systemPurple]))
+                    }
+                }
+                rows.append(attributedLabel(str, width: width))
+            }
         }
 
-        if !r.why.isEmpty {
-            rows.append(coachLabel("Why: " + r.why, size: 12, color: .secondaryLabelColor, width: width))
+        if !r.pattern.isEmpty || !r.why.isEmpty || !r.spanishTransfer.isEmpty {
+            rows.append(SeparatorLine())
+            if !r.pattern.isEmpty {
+                rows.append(coachLabel("💡 " + r.pattern, size: 13, weight: .semibold, color: .labelColor, width: width))
+            }
+            if !r.why.isEmpty {
+                rows.append(coachLabel(r.why, size: 12, color: .secondaryLabelColor, width: width))
+            }
+            if !r.spanishTransfer.isEmpty {
+                rows.append(coachLabel("From Spanish: " + r.spanishTransfer, size: 11,
+                                       color: .tertiaryLabelColor, width: width))
+            }
         }
-        if !r.pattern.isEmpty {
-            rows.append(coachLabel("Pattern: " + r.pattern, size: 12, weight: .semibold,
-                                   color: .labelColor, width: width))
-        }
-        if !r.spanishTransfer.isEmpty {
-            rows.append(coachLabel("⚠️ From Spanish: " + r.spanishTransfer, size: 12,
-                                   color: .secondaryLabelColor, width: width))
+        if let insights, !insights.targetForms.isEmpty {
+            let forms = insights.targetForms.map { insights.qualifiers[$0] ?? CoachInsights.label($0) }
+                .joined(separator: " · ")
+            rows.append(coachLabel("🎯 Focus\(insights.planIsDraft ? " (draft plan)" : ""): " + forms,
+                                   size: 11, color: .systemPurple, width: width))
         }
         return rows
+    }
+
+    private func attributedLabel(_ text: NSAttributedString, width: CGFloat) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.attributedStringValue = text
+        label.isSelectable = false
+        label.preferredMaxLayoutWidth = width
+        return label
     }
 
     private func coachLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,

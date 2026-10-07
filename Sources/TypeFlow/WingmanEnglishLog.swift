@@ -79,10 +79,8 @@ enum WingmanEnglishLog {
     /// Best-effort: a logging failure must never block or fail a send.
     static func record(_ send: ComposerSend) {
         guard let coach = send.coach,
-              let vault = resolveVault() else { return }
-        let cfg = vaultConfig(vault)
-        if let owner = cfg["owner"] as? String, owner != NSUserName() { return }
-        if let cwd = send.cwd, isSkipped(cwd, cfg) { return }
+              let vault = activeVault() else { return }
+        if let cwd = send.cwd, isSkipped(cwd, vaultConfig(vault)) { return }
 
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -114,6 +112,14 @@ enum WingmanEnglishLog {
     }
 
     // MARK: - Same resolution rules as capture-prompt.mjs
+
+    /// The learner's vault, or nil when none is configured or it belongs to
+    /// another OS user (the hook refuses those too).
+    static func activeVault() -> URL? {
+        guard let vault = resolveVault() else { return nil }
+        if let owner = vaultConfig(vault)["owner"] as? String, owner != NSUserName() { return nil }
+        return vault
+    }
 
     /// `$WINGMAN_ENGLISH_VAULT`, else `vaultPath` from the repo's config.
     private static func resolveVault() -> URL? {

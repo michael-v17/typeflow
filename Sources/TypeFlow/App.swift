@@ -28,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshStatus(sessions: sessions)
         }
         watcher.start()
+        if ProcessInfo.processInfo.environment["TYPEFLOW_DEMO_COACH"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.composer.showDemoCoach() }
+        }
 
         // Poll fast only while the composer is open; idle slowly otherwise.
         composer.onShow = { [weak self] in self?.watcher.boost() }

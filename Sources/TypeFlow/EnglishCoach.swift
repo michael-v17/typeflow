@@ -86,7 +86,7 @@ final class EnglishCoach {
     /// (knowledge/transfer/taxonomy.md — the two phonology ones don't apply to
     /// text), plus "l1-switch" for Spanish translated in place (data, not an
     /// error) and "unclassified". Cross-repo contract: copy slugs, never coin them.
-    static let categories = [
+    nonisolated static let categories = [
         "articles-and-determiners", "subject-and-pronoun-reference", "preposition-choice",
         "phrasal-verbs-and-particles", "tense-and-aspect", "verb-complementation",
         "noun-phrase-structure", "clause-word-order", "false-friends-and-calques",
@@ -263,13 +263,27 @@ final class EnglishCoach {
         return dir
     }
 
-    /// Drop no-op fixes ("check" → "check") the model sometimes emits.
+    /// Drop no-op fixes ("check" → "check") the model sometimes emits, and
+    /// straighten its typographic quotes: the composer types straight ones (smart
+    /// quotes are off so code survives), and Don't vs Don’t is not a mistake.
     private static func cleaned(_ r: CoachResult) -> CoachResult {
-        let fixes = r.fixes.filter {
-            !$0.original.isEmpty && $0.original != $0.correction
-        }
-        return CoachResult(intent: r.intent, score: r.score, native: r.native, fixes: fixes,
+        let fixes = r.fixes
+            .map { CoachFix(original: $0.original, correction: straight($0.correction),
+                            reason: $0.reason, category: $0.category) }
+            .filter { !$0.original.isEmpty && straight($0.original) != $0.correction }
+        return CoachResult(intent: r.intent, score: r.score, native: straight(r.native), fixes: fixes,
                            why: r.why, pattern: r.pattern, spanishTransfer: r.spanishTransfer)
+    }
+
+    /// ’ ‘ → '  and  “ ” → "  — one character for one, so string ranges survive.
+    nonisolated static func straight(_ s: String) -> String {
+        String(s.map { c -> Character in
+            switch c {
+            case "’", "‘": return "'"
+            case "“", "”": return "\""
+            default: return c
+            }
+        })
     }
 
     /// Keep the last meaningful stderr line (Codex prints a banner first).
@@ -296,7 +310,7 @@ final class EnglishCoach {
         - Mostly English with some Spanish words or phrases: score the English part as usual and give its mistakes their own fixes. Translate each Spanish span in place inside native, with one fix per span: original = only the Spanish words, reason "Spanish → English", category "l1-switch".
         - native is ALWAYS English.
         - score 0-100 (minor -1..-5: punctuation, slightly unnatural wording; medium -6..-15: tense, awkward structure, Spanish-style structure; major -16..-40: broken grammar or unclear intent).
-        - fixes: one per change between the text and native, smallest span. original must be copied verbatim from the text and differ from correction. reason: 2-5 words. category: the closest slug ("l1-switch" for Spanish translated in place; "false-friends-and-calques" for an English phrase built like Spanish; "unclassified" if none fits).
+        - fixes: one per change between the text and native, each at the smallest span: a word or a short phrase, NEVER a whole sentence or clause. When native restructures a sentence, list the separate changes that matter most (up to 5), each with its own short original. original must be copied verbatim from the text and differ from correction. reason: 2-5 words. category: the closest slug ("l1-switch" for Spanish translated in place; "false-friends-and-calques" for an English phrase built like Spanish; "unclassified" if none fits).
         - why: 1-2 sentences on the most important rule or native intuition. Do not repeat the pattern.
         - pattern: one short reusable rule or phrase.
         - spanish_transfer: the Spanish structure that carried over, or "".
