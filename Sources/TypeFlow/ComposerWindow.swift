@@ -230,6 +230,11 @@ final class ComposerWindow: NSWindow {
         textDelegate.onTextChanged = { [weak self] in self?.handleTextChange() }
         textDelegate.onSelectionChanged = { [weak self] in self?.clearGhostIfCaretMoved() }
         textView.delegate = textDelegate
+        textView.onTypingIntoEmpty = { [weak self] in
+            guard let self, self.liveDictated else { return }
+            self.liveDictated = false
+            self.refreshDictateButton()
+        }
 
         // Footer
         let footer = NSView()
@@ -435,9 +440,8 @@ final class ComposerWindow: NSWindow {
         textView.suggestion = nil
         clearGrammar() // the sent prompt's suggestions don't belong to the empty draft
         dismissCoach()
-        liveDictated = false
-        refreshDictateButton()
-        if let cur = currentPID { drafts[cur] = ""; draftsDictated[cur] = false } // the prompt was sent
+        // Dictation mode stays on across sends; typing into the empty box turns it off.
+        if let cur = currentPID { drafts[cur] = ""; draftsDictated[cur] = liveDictated } // the prompt was sent
     }
 
     /// Drop any pending grammar review + its marks/panel. A suggestion belongs to

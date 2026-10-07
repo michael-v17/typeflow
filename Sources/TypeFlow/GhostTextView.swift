@@ -132,6 +132,21 @@ final class GhostTextView: NSTextView {
                        y: rect.minY + textContainerOrigin.y)
     }
 
+    /// Called when a printable key is typed into an empty buffer. Dictation never
+    /// arrives via keyDown, so this means the next message is being typed.
+    var onTypingIntoEmpty: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if string.isEmpty,
+           event.modifierFlags.intersection([.command, .control]).isEmpty,
+           let chars = event.characters, chars.unicodeScalars.contains(where: {
+               CharacterSet.alphanumerics.union(.punctuationCharacters).contains($0)
+           }) {
+            onTypingIntoEmpty?()
+        }
+        super.keyDown(with: event)
+    }
+
     // Keep the ghost in sync when the caret/selection moves (e.g. arrow keys).
     override func setSelectedRanges(_ ranges: [NSValue],
                                     affinity: NSSelectionAffinity,
