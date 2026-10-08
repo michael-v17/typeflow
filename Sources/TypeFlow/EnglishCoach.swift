@@ -69,71 +69,46 @@ enum CoachError: LocalizedError {
     }
 }
 
-/// Who runs the ⌘K check, picked in the composer footer. Codex (ChatGPT plan) is the
-/// default — Luna measured best (docs/coach-benchmark.md). A Claude account is
-/// the fallback for when the ChatGPT allowance runs low.
-enum CoachProvider: Equatable {
+/// Who runs the ⌘K check, picked in the composer footer. Each case is one full
+/// choice — provider, account, model — so the menu is one click per row.
+/// Codex · GPT-6 Luna is the default; it measured best (docs/coach-benchmark.md).
+/// Claude and Antigravity are fallbacks for when the ChatGPT allowance runs low.
+enum CoachProvider: Hashable {
     case codex
     /// `account` names a `~/.claude-<account>` config dir (one per Claude login).
-    case claude(account: String)
+    case claude(account: String, model: ClaudeModel)
+    /// Google's `agy` CLI, signed in through ~/.gemini (one account).
+    case antigravity
 
-    private static let defaultsKey = "coachProvider"
-    private static let claudeModelKey = "coachClaudeModel"
-
-    /// The Claude model for the quick check. ⌘K again always uses Sonnet.
     enum ClaudeModel: String, CaseIterable {
         case haiku = "claude-haiku-5-5"
         case sonnet = "claude-sonnet-5-5"
-
-        /// Haiku at medium is the owner's pick; low is the only Sonnet effort the
-        /// benchmark measured.
-        var effort: String { self == .haiku ? "medium" : "low" }
-        var label: String { self == .haiku ? "Haiku 5.5 · medium" : "Sonnet 5.5 · low" }
-        var shortName: String { self == .haiku ? "Haiku" : "Sonnet" }
     }
 
-    static var claudeModel: ClaudeModel {
-        get { UserDefaults.standard.string(forKey: claudeModelKey).flatMap(ClaudeModel.init) ?? .haiku }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: claudeModelKey) }
-    }
+    private static let defaultsKey = "coachProvider"
 
+    /// Stored as "codex" | "claude:<account>:<model>" | "antigravity".
     static var current: CoachProvider {
         get {
-            let raw = UserDefaults.standard.string(forKey: defaultsKey) ?? ""
-            guard raw.hasPrefix("claude:") else { return .codex }
-            return .claude(account: String(raw.dropFirst("claude:".count)))
+            let parts = (UserDefaults.standard.string(forKey: defaultsKey) ?? "")
+                .split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+            switch parts.first {
+            case "claude" where parts.count >= 2:
+                let model = parts.count > 2 ? ClaudeModel(rawValue: parts[2]) : nil
+                return .claude(account: parts[1], model: model ?? .haiku)
+            case "antigravity":
+                return .antigravity
+            default:
+                return .codex
+            }
         }
         set {
             switch newValue {
             case .codex: UserDefaults.standard.removeObject(forKey: defaultsKey)
-            case .claude(let account): UserDefaults.standard.set("claude:" + account, forKey: defaultsKey)
+            case .claude(let account, let model):
+                UserDefaults.standard.set("claude:\(account):\(model.rawValue)", forKey: defaultsKey)
+            case .antigravity: UserDefaults.standard.set("antigravity", forKey: defaultsKey)
             }
-        }
-    }
-
-    var name: String {
-        switch self {
-        case .codex: return "Codex"
-        case .claude: return "Claude"
-        }
-    }
-
-    /// Footer title: what the next ⌘K will use.
-    var shortLabel: String {
-        switch self {
-        case .codex: return "Luna"
-        case .claude(let account): return "\(Self.claudeModel.shortName) · \(account)"
-        }
-    }
-
-    /// Result header: which model answered.
-    static func displayName(model: String) -> String {
-        switch model {
-        case "gpt-6-luna": return "Luna"
-        case "gpt-6-sol": return "Sol"
-        case ClaudeModel.haiku.rawValue: return "Haiku 5.5"
-        case ClaudeModel.sonnet.rawValue: return "Sonnet 5.5"
-        default: return model
         }
     }
 
@@ -141,7 +116,8 @@ enum CoachProvider: Equatable {
     var quickModel: String {
         switch self {
         case .codex: return "gpt-6-luna"
-        case .claude: return Self.claudeModel.rawValue
+        case .claude(_, let model): return model.rawValue
+        case .antigravity: return "gemini-3.8-flash-low"
         }
     }
 
@@ -149,6 +125,58 @@ enum CoachProvider: Equatable {
         switch self {
         case .codex: return "gpt-6-sol"
         case .claude: return ClaudeModel.sonnet.rawValue
+        // Not 3.1 Pro: it hit "no capacity" 503s when measured (2026-10-08).
+        case .antigravity: return "gemini-3.8-flash-medium"
+        }
+    }
+
+    /// Every deep model, for telling a deeper result apart from a quick one.
+    static let deepModels: Set = [CoachProvider.codex.deepModel, ClaudeModel.sonnet.rawValue,
+                                  CoachProvider.antigravity.deepModel]
+
+    /// Reasoning effort per model. Codex runs both at low (measured best);
+    /// Haiku at medium is the owner's pick; low is the only Sonnet effort the
+    /// benchmark measured. Gemini's effort is part of its model id.
+    static func effort(model: String) -> String {
+        model == ClaudeModel.haiku.rawValue ? "medium" : "low"
+    }
+
+    /// Human name for a model id, e.g. in the result header.
+    static func displayName(model: String) -> String {
+        switch model {
+        case "gpt-6-luna": return "GPT-6 Luna"
+        case "gpt-6-sol": return "GPT-6 Sol"
+        case ClaudeModel.haiku.rawValue: return "Haiku 5.5"
+        case ClaudeModel.sonnet.rawValue: return "Sonnet 5.5"
+        case "gemini-3.8-flash-low": return "Gemini 3.8 Flash"
+        case "gemini-3.8-flash-medium": return "Gemini 3.8 Flash (medium)"
+        default: return model
+        }
+    }
+
+    /// Footer title: what the next ⌘K will use.
+    var shortLabel: String {
+        switch self {
+        case .claude(let account, _): return "\(Self.displayName(model: quickModel)) · \(account)"
+        default: return Self.displayName(model: quickModel)
+        }
+    }
+
+    /// Menu row: model + effort.
+    var menuTitle: String {
+        switch self {
+        case .antigravity: return "Gemini 3.8 Flash · low"
+        default: return "\(Self.displayName(model: quickModel)) · \(Self.effort(model: quickModel))"
+        }
+    }
+
+    /// Menu row's second line: what to expect (docs/coach-benchmark.md).
+    var menuSubtitle: String {
+        switch self {
+        case .codex: return "Best fixes · ~6 s · ⌘K again: GPT-6 Sol"
+        case .claude(_, .haiku): return "~8 s · ⌘K again: Sonnet 5.5"
+        case .claude(_, .sonnet): return "~5 s · most consistent Claude"
+        case .antigravity: return "~10–25 s · ⌘K again: Flash medium"
         }
     }
 
@@ -169,10 +197,13 @@ enum CoachProvider: Equatable {
             return String(dir.dropFirst(prefix.count))
         }
     }
+
+    static var antigravityInstalled: Bool { EnglishCoach.agyURL() != nil }
 }
 
-/// On-demand English coaching via the Codex CLI (ChatGPT plan) or the Claude Code
-/// CLI (Claude subscription) — no API keys. See `CoachProvider`.
+/// On-demand English coaching via the Codex CLI (ChatGPT plan), the Claude Code
+/// CLI (Claude subscription), or Antigravity's `agy` (Google plan) — no API keys.
+/// See `CoachProvider`.
 ///
 /// Only runs when the user asks (⌘K) — never per keystroke. Each call is a fresh,
 /// ephemeral `codex exec` stripped down to the bare minimum (measured ~4.8k tokens
@@ -186,7 +217,7 @@ final class EnglishCoach {
     /// Default: cheap and fast. Deep (⌘K again): noticeably more natural rewrites,
     /// at a higher cost per check against the plan allowance.
     nonisolated static func isDeep(_ model: String) -> Bool {
-        model == CoachProvider.codex.deepModel || model == CoachProvider.claude(account: "").deepModel
+        CoachProvider.deepModels.contains(model)
     }
     nonisolated private static let timeout: TimeInterval = 60
     /// The writing categories of wingman-english's closed taxonomy
@@ -217,10 +248,11 @@ final class EnglishCoach {
         switch provider {
         case .codex:
             data = try await checkWithCodex(text, model: model, dir: dir)
-        case .claude(let account):
-            let effort = CoachProvider.ClaudeModel(rawValue: model)?.effort ?? "low"
-            data = try await checkWithClaude(text, model: model, effort: effort,
+        case .claude(let account, _):
+            data = try await checkWithClaude(text, model: model, effort: CoachProvider.effort(model: model),
                                              account: account, dir: dir)
+        case .antigravity:
+            data = try await checkWithAntigravity(text, model: model, dir: dir)
         }
         guard let result = try? JSONDecoder().decode(CoachResult.self, from: data) else {
             throw CoachError.badOutput
@@ -295,6 +327,34 @@ final class EnglishCoach {
               let data = try? JSONSerialization.data(withJSONObject: structured)
         else { throw CoachError.badOutput }
         return data
+    }
+
+    /// `agy` has no system-prompt flag, so the rules and the draft share one
+    /// prompt, the draft fenced off. It also has no ephemeral mode: each check
+    /// stays in Antigravity's conversation history.
+    private func checkWithAntigravity(_ text: String, model: String, dir: URL) async throws -> Data {
+        guard let agy = Self.agyURL() else { throw CoachError.failed("Antigravity CLI (`agy`) not found.") }
+        let prompt = Self.instructions + "\n\nText to evaluate (between the markers):\n<<<\n" + text + "\n>>>"
+        let args = [
+            "-p", prompt, "--model", model,
+            "--json-schema", dir.appendingPathComponent("schema.json").path,
+            "--disable-slash-commands", "--output-format", "json",
+        ]
+        let started = Date()
+        let r = try await run(agy, name: "Antigravity", args: args, stdin: "", cwd: dir)
+        try Task.checkCancellation()
+        Self.logTiming(r.status, since: started)
+        // A retried 503 ("no capacity") still reports status ERROR next to a
+        // good answer, so the answer wins.
+        let obj = (try? JSONSerialization.jsonObject(with: Data(r.stdout.utf8))) as? [String: Any]
+        if let structured = obj?["structured_output"] as? [String: Any],
+           let data = try? JSONSerialization.data(withJSONObject: structured) {
+            return data
+        }
+        let msg = (obj?["error"] as? String)
+            ?? r.stderr.split(separator: "\n").last.map(String.init)
+            ?? "failed — run `agy` in a terminal if you're signed out."
+        throw CoachError.failed("Antigravity: " + String(msg.prefix(200)))
     }
 
     private static func logTiming(_ status: Int32, since started: Date) {
@@ -416,6 +476,13 @@ final class EnglishCoach {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex",
                           "\(home)/.local/bin/codex", "\(home)/.npm-global/bin/codex"]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    nonisolated static func agyURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = ["/opt/homebrew/bin/agy", "/usr/local/bin/agy", "\(home)/.local/bin/agy"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
             .map { URL(fileURLWithPath: $0) }
     }

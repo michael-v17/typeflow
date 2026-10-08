@@ -5,7 +5,7 @@ Rerun when a new model ships or a provider changes its CLI.
 
 **Decision: keep `gpt-6-luna` (Codex, ChatGPT plan) as the default and `gpt-6-sol` as ⌘K-again.**
 No Apple provider. **Update 2026-10-08:** a Claude fallback was added for when the Codex budget
-runs low — the composer footer's `⌘K:` dropdown → a Claude account. The owner picked Haiku 5.5 at medium for the quick
+runs low — the composer's `⌘K` picker → a Claude account (or Antigravity · Gemini 3.8 Flash, spot-checked: 10–25 s, same miss on the broken question). The owner picked Haiku 5.5 at medium for the quick
 check (Sonnet 5.5 low for ⌘K again); Luna stays the default.
 
 ## Method

@@ -326,7 +326,6 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
         footer.addSubview(dictateButton)
-        footer.addSubview(coachPicker)
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -351,11 +350,16 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         closeButton.imagePosition = .imageOnly
         closeButton.toolTip = "Close (Esc)"
         container.addSubview(closeButton)
+        // The coach picker shares the header row with × — the footer has no room
+        // once the coach's longer hints show.
+        container.addSubview(coachPicker)
         NSLayoutConstraint.activate([
             closeButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
             closeButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             closeButton.widthAnchor.constraint(equalToConstant: 18),
             closeButton.heightAnchor.constraint(equalToConstant: 18),
+            coachPicker.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            coachPicker.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
         ])
 
         // The text area prefers a fixed height (priority high, not required, so a
@@ -367,7 +371,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         scrollHeight.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 30), // below the header row
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             scrollHeight,
@@ -393,9 +397,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
             sessionLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
             sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: coachPicker.leadingAnchor, constant: -8),
-            coachPicker.trailingAnchor.constraint(equalTo: dictateButton.leadingAnchor, constant: -10),
-            coachPicker.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: dictateButton.leadingAnchor, constant: -8),
             keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
             keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
@@ -428,6 +430,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         makeFirstResponder(textView)
         onShow?() // boost the session poll while we're open
+        refreshCoachPicker()
         // Follow the focused Warp tab live while the composer is open.
         lastWarpTitle = nil   // force the first poll to follow
         followTick()
@@ -1052,7 +1055,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             spinner.style = .spinning
             spinner.controlSize = .small
             spinner.startAnimation(nil)
-            let label = coachLabel(deep ? "Rewriting more naturally (deeper check)…" : "Checking your English with \(CoachProvider.current.name)…",
+            let label = coachLabel(deep ? "Rewriting more naturally with \(CoachProvider.displayName(model: CoachProvider.current.deepModel))…" : "Checking your English with \(CoachProvider.displayName(model: CoachProvider.current.quickModel))…",
                                    size: 12, color: .secondaryLabelColor)
             let row = NSStackView(views: [spinner, label])
             row.spacing = 8
@@ -1356,54 +1359,41 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     // MARK: - Coach picker
 
-    /// A pull-down's first item is its title; the rest is the menu.
+    /// A pull-down's first item is its title; the rest is the menu: one section
+    /// per provider/account, one row per model, each row a complete choice.
     private func refreshCoachPicker() {
         let menu = coachPicker.menu!
         menu.removeAllItems()
         let current = CoachProvider.current
-        menu.addItem(withTitle: "⌘K: " + current.shortLabel, action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "⌘K  " + current.shortLabel, action: nil, keyEquivalent: "")
 
-        func add(_ title: String, on: Bool, action: Selector, _ value: Any?, indent: Bool = true) {
-            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
-            item.target = self
-            item.representedObject = value
-            item.state = on ? .on : .off
-            if indent { item.indentationLevel = 1 }
+        func section(_ title: String, _ choices: [CoachProvider]) {
+            if menu.items.count > 1 { menu.addItem(.separator()) }
+            menu.addItem(.sectionHeader(title: title))
+            for choice in choices {
+                let item = menu.addItem(withTitle: choice.menuTitle,
+                                        action: #selector(pickCoachProvider(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = choice
+                item.subtitle = choice.menuSubtitle
+                item.state = choice == current ? .on : .off
+            }
         }
-        add("Codex · Luna (best)", on: current == .codex, action: #selector(pickCoachProvider(_:)),
-            CoachProvider.codex, indent: false)
+        section("Codex — ChatGPT plan", [.codex])
 
         var accounts = CoachProvider.claudeAccounts()
-        if case .claude(let a) = current, !accounts.contains(a) { accounts.append(a) } // since removed
-        guard !accounts.isEmpty else { return }
-        menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "Claude account"))
+        if case .claude(let a, _) = current, !accounts.contains(a) { accounts.append(a) } // since removed
         for a in accounts {
-            add(a, on: current == .claude(account: a), action: #selector(pickCoachProvider(_:)),
-                CoachProvider.claude(account: a))
+            section("Claude — \(a)", CoachProvider.ClaudeModel.allCases.map { .claude(account: a, model: $0) })
         }
-        menu.addItem(.sectionHeader(title: "Claude model (⌘K again: Sonnet)"))
-        for m in CoachProvider.ClaudeModel.allCases {
-            add(m.label, on: current != .codex && CoachProvider.claudeModel == m,
-                action: #selector(pickClaudeModel(_:)), m.rawValue)
+        if CoachProvider.antigravityInstalled || current == .antigravity {
+            section("Antigravity — Google", [.antigravity])
         }
     }
 
     @objc private func pickCoachProvider(_ sender: NSMenuItem) {
         guard let provider = sender.representedObject as? CoachProvider else { return }
         CoachProvider.current = provider
-        refreshCoachPicker()
-        makeFirstResponder(textView)
-    }
-
-    /// Picking a model while on Codex switches to Claude (first account).
-    @objc private func pickClaudeModel(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let model = CoachProvider.ClaudeModel(rawValue: raw) else { return }
-        CoachProvider.claudeModel = model
-        if CoachProvider.current == .codex, let first = CoachProvider.claudeAccounts().first {
-            CoachProvider.current = .claude(account: first)
-        }
         refreshCoachPicker()
         makeFirstResponder(textView)
     }
