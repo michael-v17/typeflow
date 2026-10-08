@@ -31,6 +31,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private var coachExtraHeight: CGFloat = 0
     private static let coachMaxHeight: CGFloat = 360
     private static let defaultHint = "↵ send   ⌘K check English   ⇧↵ newline   ⎋ close"
+    /// The resting hint: with a message to answer, ⌘K suggests a reply instead.
+    private var idleHint: String {
+        liveContext == nil ? Self.defaultHint : "↵ send   ⌘K suggest reply   ⇧↵ newline   ⎋ close"
+    }
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
@@ -562,7 +566,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             let png = ScreenText.uploadPNG(image)
             guard let self, self.currentPID == pid else { return }
             self.hintLabel.textColor = .tertiaryLabelColor
-            self.hintLabel.stringValue = Self.defaultHint
+            self.hintLabel.stringValue = self.idleHint
             guard png != nil || !text.isEmpty else { NSSound.beep(); return }
             // No text is fine (a diagram, a photo): the coach still sees the image.
             self.setContext(ReplyContext(text: text, source: .screenshot, image: png))
@@ -603,6 +607,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             contextText.scroll(.zero)
         }
         contextBox.isHidden = liveContext == nil
+        if coachState == nil { hintLabel.stringValue = idleHint }
         contextHeight.constant = h
         contextGap.constant = h > 0 ? 8 : 0
         let total = h > 0 ? h + 8 : 0
@@ -1279,7 +1284,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         coachStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let width = max(200, frame.width - 40)
         var rows: [NSView] = []
-        var hint = Self.defaultHint
+        var hint = idleHint
 
         var removals: [(range: NSRange, slip: Bool)] = []
         switch coachState {
@@ -1588,7 +1593,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.hintLabel.stringValue == message else { return }
             self.hintLabel.textColor = .tertiaryLabelColor
-            self.hintLabel.stringValue = Self.defaultHint
+            self.hintLabel.stringValue = self.idleHint
         }
     }
 
