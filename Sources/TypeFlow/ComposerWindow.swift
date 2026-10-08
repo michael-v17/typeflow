@@ -38,6 +38,26 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
     private let coachPicker = NSPopUpButton(frame: .zero, pullsDown: true)
     private let dictateButton = NSButton()
+    /// Reply mode: the message being answered (⌘⇧V from the clipboard). With one
+    /// set, ⌘K suggests a reply built from the draft's idea. Per session, like the
+    /// draft; cleared on send. Never logged.
+    private struct ReplyContext {
+        enum Source: String { case text = "pasted text", screenshot }
+        let text: String
+        let source: Source
+    }
+    private var contexts: [pid_t: ReplyContext] = [:]
+    /// The visible session's context (mirrors contexts[currentPID], like liveDictated).
+    private var liveContext: ReplyContext?
+    private let replyButton = NSButton()
+    private let contextBox = NSView()
+    private let contextTitle = NSTextField(labelWithString: "")
+    private let contextScroll = NSScrollView()
+    private let contextText = NSTextView()
+    private var contextHeight: NSLayoutConstraint!
+    private var contextGap: NSLayoutConstraint!
+    private var contextExtraHeight: CGFloat = 0
+    private static let contextMaxTextHeight: CGFloat = 90
     /// Returns true if the send succeeded; on false the composer keeps its text.
     private var onSubmit: ((ComposerSend) -> Bool)?
     private let textDelegate = ComposerTextDelegate()
@@ -353,6 +373,25 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // The coach picker shares the header row with × — the footer has no room
         // once the coach's longer hints show.
         container.addSubview(coachPicker)
+        // Reply mode lives on the header row's left: the button that takes the
+        // copied message, and under it the box showing that message.
+        replyButton.translatesAutoresizingMaskIntoConstraints = false
+        replyButton.isBordered = false
+        replyButton.bezelStyle = .accessoryBarAction
+        replyButton.controlSize = .small
+        replyButton.image = NSImage(systemSymbolName: "arrowshape.turn.up.left",
+                                    accessibilityDescription: "Reply to the copied message")
+        replyButton.imagePosition = .imageLeading
+        replyButton.attributedTitle = NSAttributedString(string: "Reply to copied message  ⌘⇧V", attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        replyButton.contentTintColor = .secondaryLabelColor
+        replyButton.toolTip = "Paste the message you're answering — ⌘K then helps you reply to it"
+        replyButton.target = self
+        replyButton.action = #selector(pasteAsContext)
+        container.addSubview(replyButton)
+        buildContextBox()
+        container.addSubview(contextBox)
+
         NSLayoutConstraint.activate([
             closeButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
             closeButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
@@ -360,6 +399,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             closeButton.heightAnchor.constraint(equalToConstant: 18),
             coachPicker.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             coachPicker.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
+            replyButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            replyButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            replyButton.trailingAnchor.constraint(lessThanOrEqualTo: coachPicker.leadingAnchor, constant: -8),
+            contextBox.topAnchor.constraint(equalTo: container.topAnchor, constant: 30),
+            contextBox.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            contextBox.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
         ])
 
         // The text area prefers a fixed height (priority high, not required, so a
@@ -370,8 +415,11 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         let scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 140)
         scrollHeight.priority = .defaultHigh
 
+        // Below the header row, or below the reply context when there is one.
+        contextHeight = contextBox.heightAnchor.constraint(equalToConstant: 0)
+        contextGap = scroll.topAnchor.constraint(equalTo: contextBox.bottomAnchor, constant: 0)
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 30), // below the header row
+            contextHeight, contextGap,
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
             scrollHeight,
@@ -414,6 +462,126 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         coachPanelHeight.isActive = true
     }
 
+    // MARK: - Reply context (⌘⇧V)
+
+    /// "REPLYING TO · pasted text  ×" over the message, read-only and scrolling
+    /// past a few lines. Zero height until a message is pasted.
+    private func buildContextBox() {
+        contextBox.translatesAutoresizingMaskIntoConstraints = false
+        contextBox.wantsLayer = true
+        contextBox.layer?.cornerRadius = 8
+        contextBox.layer?.cornerCurve = .continuous
+        contextBox.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.08).cgColor
+        contextBox.isHidden = true
+
+        contextTitle.translatesAutoresizingMaskIntoConstraints = false
+        contextTitle.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        contextTitle.textColor = .tertiaryLabelColor
+        contextTitle.lineBreakMode = .byTruncatingTail
+
+        let remove = NSButton(title: "", target: self, action: #selector(removeContext))
+        remove.translatesAutoresizingMaskIntoConstraints = false
+        remove.isBordered = false
+        remove.bezelStyle = .accessoryBarAction
+        remove.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Remove the message")
+        remove.imagePosition = .imageOnly
+        remove.contentTintColor = .tertiaryLabelColor
+        remove.toolTip = "Stop replying to this message"
+
+        // Frame-based document view inside an autolayout scroll view, same as
+        // the draft's text view (see buildContent).
+        contextText.isEditable = false
+        contextText.isSelectable = true
+        contextText.isRichText = false
+        contextText.drawsBackground = false
+        contextText.font = NSFont.systemFont(ofSize: 12)
+        contextText.textColor = .secondaryLabelColor
+        contextText.textContainerInset = NSSize(width: 0, height: 2)
+        contextText.isVerticallyResizable = true
+        contextText.isHorizontallyResizable = false
+        contextText.autoresizingMask = [.width]
+        contextText.textContainer?.widthTracksTextView = true
+        contextText.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        contextScroll.translatesAutoresizingMaskIntoConstraints = false
+        contextScroll.drawsBackground = false
+        contextScroll.hasVerticalScroller = true
+        contextScroll.autohidesScrollers = true
+        contextScroll.borderType = .noBorder
+        contextScroll.documentView = contextText
+
+        contextBox.addSubview(contextTitle)
+        contextBox.addSubview(remove)
+        contextBox.addSubview(contextScroll)
+        NSLayoutConstraint.activate([
+            contextTitle.topAnchor.constraint(equalTo: contextBox.topAnchor, constant: 6),
+            contextTitle.leadingAnchor.constraint(equalTo: contextBox.leadingAnchor, constant: 10),
+            contextTitle.trailingAnchor.constraint(lessThanOrEqualTo: remove.leadingAnchor, constant: -6),
+            remove.centerYAnchor.constraint(equalTo: contextTitle.centerYAnchor),
+            remove.trailingAnchor.constraint(equalTo: contextBox.trailingAnchor, constant: -6),
+            remove.widthAnchor.constraint(equalToConstant: 14),
+            remove.heightAnchor.constraint(equalToConstant: 14),
+            contextScroll.topAnchor.constraint(equalTo: contextTitle.bottomAnchor, constant: 2),
+            contextScroll.leadingAnchor.constraint(equalTo: contextBox.leadingAnchor, constant: 10),
+            contextScroll.trailingAnchor.constraint(equalTo: contextBox.trailingAnchor, constant: -6),
+            contextScroll.bottomAnchor.constraint(equalTo: contextBox.bottomAnchor, constant: -6),
+        ])
+    }
+
+    /// ⌘⇧V / the header button: the clipboard's text becomes the message to answer.
+    @objc private func pasteAsContext() {
+        let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !text.isEmpty else {
+            NSSound.beep()
+            flashHint("Copy the message you're answering first", color: .secondaryLabelColor)
+            return
+        }
+        setContext(ReplyContext(text: text, source: .text))
+        makeFirstResponder(textView)
+    }
+
+    @objc private func removeContext() {
+        setContext(nil)
+        makeFirstResponder(textView)
+    }
+
+    /// A result was computed for the old context (or none), so it goes too.
+    private func setContext(_ context: ReplyContext?) {
+        liveContext = context
+        dismissCoach()
+        renderContext()
+    }
+
+    /// Show `liveContext` (or hide the box) and grow the window to fit, top edge fixed.
+    private func renderContext() {
+        var h: CGFloat = 0
+        if let ctx = liveContext {
+            let cut = ctx.text.count > EnglishCoach.contextLimit ? " · last \(EnglishCoach.contextLimit / 1000)k characters" : ""
+            contextTitle.stringValue = "REPLYING TO · \(ctx.source.rawValue)\(cut)"
+            contextText.string = ctx.text
+            // Measure at the width the text will have once the box is laid out.
+            let width = max(100, frame.width - 40 - 16)
+            contextText.frame.size.width = width
+            contextText.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+            var textH: CGFloat = 16
+            if let lm = contextText.layoutManager, let tc = contextText.textContainer {
+                lm.ensureLayout(for: tc)
+                textH = lm.usedRect(for: tc).height + 4
+            }
+            h = min(textH, Self.contextMaxTextHeight) + 28 // title + paddings
+            contextText.scroll(.zero)
+        }
+        contextBox.isHidden = liveContext == nil
+        contextHeight.constant = h
+        contextGap.constant = h > 0 ? 8 : 0
+        let total = h > 0 ? h + 8 : 0
+        let delta = total - contextExtraHeight
+        if abs(delta) > 0.5 {
+            contextExtraHeight = total
+            growWindow(by: delta)
+        }
+    }
+
     // MARK: - Behavior
 
     override var canBecomeKey: Bool { true }
@@ -440,7 +608,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     func hide() {
         stopFollowTimer()
         onHide?() // drop the session poll back to idle cadence
-        if let cur = currentPID { drafts[cur] = textView.string; draftsDictated[cur] = liveDictated } // preserve draft
+        if let cur = currentPID { // preserve draft
+            drafts[cur] = textView.string; draftsDictated[cur] = liveDictated; contexts[cur] = liveContext
+        }
         textView.suggestion = nil
         ghostCompleter.cancel()
         clearGrammar()
@@ -461,7 +631,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         clearGrammar() // the sent prompt's suggestions don't belong to the empty draft
         dismissCoach()
         // Dictation mode stays on across sends; typing into the empty box turns it off.
-        if let cur = currentPID { drafts[cur] = ""; draftsDictated[cur] = liveDictated } // the prompt was sent
+        // The reply went out, so its message is done with.
+        liveContext = nil
+        renderContext()
+        if let cur = currentPID { drafts[cur] = ""; draftsDictated[cur] = liveDictated; contexts[cur] = nil } // the prompt was sent
     }
 
     /// Drop any pending grammar review + its marks/panel. A suggestion belongs to
@@ -743,6 +916,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         drafts = drafts.filter { alive.contains($0.key) }
         tabNames = tabNames.filter { alive.contains($0.key) }
         draftsDictated = draftsDictated.filter { alive.contains($0.key) }
+        contexts = contexts.filter { alive.contains($0.key) }
         if let cur = currentPID, !alive.contains(cur) { currentPID = nil }
 
         guard !sessions.isEmpty else {
@@ -807,11 +981,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// first so nothing is lost. No-op if already on that session.
     private func switchTo(_ pid: pid_t) {
         guard pid != currentPID else { return }
-        if let cur = currentPID { drafts[cur] = textView.string; draftsDictated[cur] = liveDictated }
+        if let cur = currentPID {
+            drafts[cur] = textView.string; draftsDictated[cur] = liveDictated; contexts[cur] = liveContext
+        }
         currentPID = pid
         textView.string = drafts[pid] ?? ""
         liveDictated = draftsDictated[pid] ?? false
+        liveContext = contexts[pid]
         refreshDictateButton()
+        renderContext()
         textView.suggestion = nil
         clearGrammar() // the previous session's suggestions don't apply to this draft
         dismissCoach()
@@ -951,11 +1129,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     // MARK: - English coach (⌘K)
-    /// Debug only (`TYPEFLOW_DEMO_COACH=1`): open the composer with a canned coach
-    /// result so the panel layout can be checked (and screenshotted) without a
-    /// Codex call or a send.
-    func showDemoCoach() {
+    /// Debug only (`TYPEFLOW_DEMO_COACH=1`, or `=reply` for reply mode): open the
+    /// composer with a canned coach result so the panel layout can be checked (and
+    /// screenshotted) without a Codex call or a send.
+    func showDemoCoach(reply: Bool = false) {
         show()
+        if reply { showDemoReply(); return }
         let draft = "give me a markdown with the information for this lesson. Don't add extra information."
         textView.string = draft
         let r = CoachResult(
@@ -976,6 +1155,30 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
 
+    private func showDemoReply() {
+        setContext(ReplyContext(text: """
+            Two caveats:
+            - One thing may stay: iOS shows its saved picture of the app during its own zoom.
+            - Only your phone can verify this: the simulator can't show the real shield.
+
+            Should I go ahead and put a Release build on your iPhone when it's ready?
+            """, source: .text))
+        let draft = "yes but first test it in the simulator to make sure nothing breaks"
+        textView.string = draft
+        let r = CoachResult(
+            intent: "Agree, but test in the simulator first.", score: 82,
+            native: "Yes, but test it in the simulator first to make sure nothing breaks.",
+            fixes: [CoachFix(original: "yes but", correction: "Yes, but", reason: "capitalize, add comma",
+                             category: "mechanics-punctuation-and-capitalization")],
+            why: "It's a yes-no question, so the answer leads and the condition follows.",
+            pattern: "Yes-no question: lead with yes or no, then the condition.", spanishTransfer: "",
+            model: "gpt-6-luna", provider: "codex",
+            asked: [CoachQuestion(question: "Put a Release build on your iPhone when it's ready?",
+                                  kind: "yes-no", answered: true, note: "")])
+        coachState = .result(r, draft: draft)
+        renderCoach()
+    }
+
     /// Ask the coach about the current draft. Runs only on demand — each check
     /// costs plan quota — and shows a loading row until the answer lands.
     /// ⌘K on a draft that already has a quick result re-checks it with the deeper
@@ -990,6 +1193,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             guard !EnglishCoach.isDeep(r.model) else { NSSound.beep(); return } // already deep
             deep = true
         }
+        let context = liveContext?.text
         textView.suggestion = nil
         ghostCompleter.cancel()
         clearGrammar() // the coach covers grammar too; one panel at a time
@@ -999,7 +1203,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         coachTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await self.coach.check(draft, deep: deep)
+                let result = try await self.coach.check(draft, deep: deep, context: context)
                 guard !Task.isCancelled, self.textView.string == draft else { return }
                 self.coachState = .result(result, draft: draft)
                 self.unsentChecks[self.currentPID ?? 0] = ComposerSend(
@@ -1007,7 +1211,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
                     draft: draft.trimmingCharacters(in: .whitespacesAndNewlines),
                     dictated: self.liveDictated, coach: result, corrected: false,
                     cwd: self.sessions.first(where: { $0.pid == self.currentPID })?.cwd,
-                    destination: .unsent)
+                    destination: .unsent, reply: context != nil)
             } catch is CancellationError {
                 return
             } catch {
@@ -1055,8 +1259,11 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             spinner.style = .spinning
             spinner.controlSize = .small
             spinner.startAnimation(nil)
-            let label = coachLabel(deep ? "Rewriting more naturally with \(CoachProvider.displayName(model: CoachProvider.current.deepModel))…" : "Checking your English with \(CoachProvider.displayName(model: CoachProvider.current.quickModel))…",
-                                   size: 12, color: .secondaryLabelColor)
+            let model = CoachProvider.displayName(model: deep ? CoachProvider.current.deepModel
+                                                              : CoachProvider.current.quickModel)
+            let doing = liveContext != nil ? (deep ? "Rewriting your reply more naturally" : "Drafting your reply")
+                : (deep ? "Rewriting more naturally" : "Checking your English")
+            let label = coachLabel("\(doing) with \(model)…", size: 12, color: .secondaryLabelColor)
             let row = NSStackView(views: [spinner, label])
             row.spacing = 8
             rows.append(row)
@@ -1066,11 +1273,11 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             hint = "↵ send   ⌘⇧C copy   ⌘K retry   ⎋ close panel"
         case .result(let r, let draft):
             rows += coachRows(r, draft: draft, width: width)
-            if !r.isTranslation && !r.isClean { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
+            if !r.isTranslation && !r.isClean(for: draft) { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
             let deeper = EnglishCoach.isDeep(r.model) ? "" : "   ⌘K deeper"
-            hint = r.isClean ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
-                : r.isTranslation ? "↵ send English   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
-                : "↵ send corrected   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
+            let sendWhat = r.isReply ? "reply" : r.isTranslation ? "English" : "corrected"
+            hint = r.isClean(for: draft) ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
+                : "↵ send \(sendWhat)   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
         }
 
         textView.setCoachRemovals(removals) // cleared whenever there's no result
@@ -1122,8 +1329,29 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         rows.append(attributedLabel(header, width: width))
 
-        if r.isClean {
-            rows.append(coachLabel("✓ Sounds natural. No changes needed.", size: 13, color: .systemGreen, width: width))
+        if let asked = r.asked, !asked.isEmpty {
+            rows.append(SeparatorLine())
+            rows.append(coachLabel("ASKED", size: 10, weight: .semibold, color: .tertiaryLabelColor))
+            for q in asked {
+                let str = NSMutableAttributedString(string: q.answered ? "✓ " : "✗ ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                    .foregroundColor: q.answered ? NSColor.systemGreen : NSColor.systemOrange])
+                str.append(NSAttributedString(string: q.question, attributes: [
+                    .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]))
+                str.append(NSAttributedString(string: "    \(q.kind)", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
+                if !q.answered, !q.note.isEmpty {
+                    str.append(NSAttributedString(string: " · \(q.note)", attributes: [
+                        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemOrange]))
+                }
+                rows.append(attributedLabel(str, width: width))
+            }
+        }
+
+        if r.isClean(for: draft) {
+            let msg = r.isReply ? "✓ Your reply answers it naturally. No changes needed."
+                : "✓ Sounds natural. No changes needed."
+            rows.append(coachLabel(msg, size: 13, color: .systemGreen, width: width))
             return rows
         }
 
@@ -1132,7 +1360,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // sends: the corrected version, additions in green. A translation shares
         // no words with the Spanish, so it's shown plain.
         rows.append(SeparatorLine())
-        rows.append(coachLabel(r.isTranslation ? "IN ENGLISH" : "CORRECTED", size: 10, weight: .semibold,
+        rows.append(coachLabel(r.isReply ? (r.isTranslation ? "REPLY IN ENGLISH" : "REPLY")
+                               : r.isTranslation ? "IN ENGLISH" : "CORRECTED", size: 10, weight: .semibold,
                                color: .tertiaryLabelColor))
         let sides = r.isTranslation ? nil : TrackChanges.sides(from: draft, to: r.native, size: 13)
         let corrected = sides.map { attributedLabel($0.corrected, width: width) }
@@ -1243,6 +1472,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             copyForElsewhere()
             return true
         }
+        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "v" {
+            pasteAsContext()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -1263,7 +1496,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         switch coachState {
         case .loading:
             NSSound.beep()
-        case .result(let r, let draft) where draft == textView.string && !r.isClean:
+        case .result(let r, let draft) where draft == textView.string && !r.isClean(for: draft):
             send(r.native, coach: r, corrected: true)
         default:
             send(textView.string, coach: currentCoachResult, corrected: false)
@@ -1285,7 +1518,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         switch coachState {
         case .loading:
             NSSound.beep(); return
-        case .result(let r, let draft) where draft == textView.string && !r.isClean:
+        case .result(let r, let draft) where draft == textView.string && !r.isClean(for: draft):
             (raw, coach, corrected) = (r.native, r, true)
         default:
             (raw, coach, corrected) = (textView.string, currentCoachResult, false)
@@ -1299,7 +1532,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             text: text,
             draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
             dictated: liveDictated, coach: coach, corrected: corrected,
-            cwd: nil, destination: .clipboard))
+            cwd: nil, destination: .clipboard, reply: liveContext != nil))
         unsentChecks[currentPID ?? 0] = nil
         clear()
         if keepOpen {
@@ -1311,9 +1544,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     /// Briefly replace the footer hint with a confirmation, then restore it.
-    private func flashHint(_ message: String) {
+    private func flashHint(_ message: String, color: NSColor = .systemGreen) {
         hintLabel.stringValue = message
-        hintLabel.textColor = .systemGreen
+        hintLabel.textColor = color
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.hintLabel.stringValue == message else { return }
             self.hintLabel.textColor = .tertiaryLabelColor
@@ -1337,7 +1570,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             text: text,
             draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
             dictated: liveDictated, coach: coach, corrected: corrected,
-            cwd: sessions.first(where: { $0.pid == currentPID })?.cwd)
+            cwd: sessions.first(where: { $0.pid == currentPID })?.cwd, reply: liveContext != nil)
         // If the send failed (e.g. Warp not running), keep the text and the
         // window so the user doesn't lose their prompt.
         guard onSubmit?(send) == true else { return }
