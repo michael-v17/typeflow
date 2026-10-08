@@ -1,18 +1,46 @@
 import AppKit
 
-final class ComposerWindow: NSWindow {
+final class ComposerWindow: NSWindow, NSMenuDelegate {
     let textView = GhostTextView()
     private let wordCompleter = WordCompleter()
-    private let sessionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let hintLabel = NSTextField(labelWithString: "↵ send   ⇧↵ newline   ⎋ close")
+    private let ghostCompleter = GhostCompleter()
+    private let grammarReviewer = GrammarReviewer()
+    /// Suggestions panel (between the text and the footer) listing the current
+    /// grammar/naturalness fixes; the window grows downward to fit it.
+    private let grammarPanel = NSStackView()
+    private var grammarPanelHeight: NSLayoutConstraint!
+    private var currentSpans: [GrammarSpan] = []
+    /// How much window height the panel currently adds (0 when there are no issues).
+    private var panelExtraHeight: CGFloat = 0
+    /// On-demand English coaching (⌘K) via Codex or Claude, shown in its own panel below
+    /// the grammar suggestions. Scrolls when the coaching runs long.
+    private let coach = EnglishCoach()
+    private enum CoachState {
+        case loading(draft: String, deep: Bool)
+        case result(CoachResult, draft: String)
+        case failed(String)
+    }
+    private var coachState: CoachState?
+    /// The latest ⌘K check per session that hasn't been sent or copied yet.
+    /// Logged as unsent once its draft is abandoned; dropped on send/copy.
+    private var unsentChecks: [pid_t: ComposerSend] = [:]
+    private var coachTask: Task<Void, Never>?
+    private let coachScroll = NSScrollView()
+    private let coachStack = NSStackView()
+    private var coachPanelHeight: NSLayoutConstraint!
+    private var coachExtraHeight: CGFloat = 0
+    private static let coachMaxHeight: CGFloat = 360
+    private static let defaultHint = "↵ send   ⌘K check English   ⇧↵ newline   ⎋ close"
+    private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
+    private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
+    private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
+    /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
+    private let coachPicker = NSPopUpButton(frame: .zero, pullsDown: true)
     private let dictateButton = NSButton()
     /// Returns true if the send succeeded; on false the composer keeps its text.
-    private var onSubmit: ((String) -> Bool)?
+    private var onSubmit: ((ComposerSend) -> Bool)?
     private let textDelegate = ComposerTextDelegate()
-
-    /// Called when the user picks a session from the footer dropdown.
-    var onSessionSelected: ((pid_t) -> Void)?
 
     /// Called when the composer is shown / hidden, so the app can speed up or
     /// slow down the session-poll cadence.
@@ -33,13 +61,24 @@ final class ComposerWindow: NSWindow {
     // of whichever Warp tab is focused.
     private var sessions: [ClaudeSession] = []
     private var drafts: [pid_t: String] = [:]
+    /// Per-session "this draft was dictated" flag, parallel to `drafts`. When set,
+    /// the send carries the ;;v marker, so wingman-english reads it as spoken
+    /// (misrecognition, not grammar). Conservative: once the mic
+    /// is used for a draft, the whole send is treated as voice.
+    private var draftsDictated: [pid_t: Bool] = [:]
+    /// Live dictated flag for the visible draft (mirrors draftsDictated[currentPID],
+    /// the way textView.string mirrors drafts[currentPID]).
+    private var liveDictated = false
     private var currentPID: pid_t?
     /// Last-seen Warp focused-window title. We re-follow only on a real change,
     /// so a manual dropdown pick isn't immediately overridden by the poll.
     private var lastWarpTitle: String?
+    /// Custom Warp tab names (from Warp's session DB) for sessions we've seen in
+    /// the front tab — the footer shows these instead of the folder name.
+    private var tabNames: [pid_t: String] = [:]
     private var followTimer: Timer?
 
-    init(onSubmit: @escaping (String) -> Bool) {
+    init(onSubmit: @escaping (ComposerSend) -> Bool) {
         self.onSubmit = onSubmit
         // .titled (not .borderless) — Apple Intelligence's inline prediction
         // service appears to require a titled-window class to attach the
@@ -56,6 +95,10 @@ final class ComposerWindow: NSWindow {
         hideTitleBarChrome()
         buildContent()
         center()
+        // Warm the on-device model once so the first phrase completion is fast.
+        // No-op (logs to stderr) if Foundation Models isn't available.
+        ghostCompleter.bootstrap()
+        grammarReviewer.bootstrap()
     }
 
     private func hideTitleBarChrome() {
@@ -77,7 +120,11 @@ final class ComposerWindow: NSWindow {
     private func configureWindow() {
         isMovableByWindowBackground = true
         level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        // .moveToActiveSpace (not .canJoinAllSpaces): keep the floating level so the
+        // composer stays above other windows, but show it ONLY on the desktop the
+        // user is working on — invoking ⌥Space brings it to the current Space, and
+        // switching to another Space doesn't reveal a stray TypeFlow window there.
+        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient]
         hidesOnDeactivate = false
         isOpaque = false
         backgroundColor = .clear
@@ -182,28 +229,30 @@ final class ComposerWindow: NSWindow {
 
         scroll.documentView = textView
         textDelegate.onSubmit = { [weak self] in self?.submit() }
-        textDelegate.onCancel = { [weak self] in self?.hide() }
+        textDelegate.onCancel = { [weak self] in self?.handleEscape() }
+        textDelegate.onSubmitOriginal = { [weak self] in self?.submitOriginal() }
+        textDelegate.isCoachShowing = { [weak self] in self?.coachState != nil }
         textDelegate.onTextChanged = { [weak self] in self?.handleTextChange() }
         textDelegate.onSelectionChanged = { [weak self] in self?.clearGhostIfCaretMoved() }
         textView.delegate = textDelegate
+        textView.onTypingIntoEmpty = { [weak self] in
+            guard let self, self.liveDictated else { return }
+            self.liveDictated = false
+            self.refreshDictateButton()
+        }
 
         // Footer
         let footer = NSView()
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        sessionPicker.translatesAutoresizingMaskIntoConstraints = false
-        sessionPicker.isBordered = false
-        sessionPicker.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        sessionPicker.controlSize = .small
-        sessionPicker.target = self
-        sessionPicker.action = #selector(sessionPickerChanged(_:))
-        if let cell = sessionPicker.cell as? NSPopUpButtonCell {
-            cell.arrowPosition = .arrowAtBottom
-            cell.bezelStyle = .accessoryBarAction
-        }
-        // Seed with the empty state — App will repopulate via setSessions.
-        sessionPicker.addItem(withTitle: "→ no Claude Code session")
-        sessionPicker.isEnabled = false
+        // Read-only indicator of the session we're on — i.e. the frontmost Warp
+        // tab the send will land in. Not interactive: routing is "the tab you have
+        // focused in Warp", so the label just confirms you're on the right one.
+        sessionLabel.translatesAutoresizingMaskIntoConstraints = false
+        sessionLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        sessionLabel.textColor = .secondaryLabelColor
+        sessionLabel.lineBreakMode = .byTruncatingTail
+        sessionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
@@ -215,7 +264,16 @@ final class ComposerWindow: NSWindow {
         keepOpenCheckbox.target = self
         keepOpenCheckbox.action = #selector(keepOpenToggled(_:))
         keepOpenCheckbox.state = keepOpen ? .on : .off
-        keepOpenCheckbox.toolTip = "Enter sends without closing the composer"
+        keepOpenCheckbox.toolTip = "Sending (↵) or copying (⌘⇧C) clears the draft without closing the composer"
+
+        coachPicker.translatesAutoresizingMaskIntoConstraints = false
+        coachPicker.isBordered = false
+        coachPicker.controlSize = .small
+        coachPicker.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        coachPicker.contentTintColor = .secondaryLabelColor
+        coachPicker.toolTip = "Model for ⌘K checks"
+        coachPicker.menu?.delegate = self // rebuilt on open: Claude logins can change
+        refreshCoachPicker()
 
         dictateButton.translatesAutoresizingMaskIntoConstraints = false
         dictateButton.isBordered = false
@@ -228,7 +286,43 @@ final class ComposerWindow: NSWindow {
         dictateButton.target = self
         dictateButton.action = #selector(startDictationClicked)
 
-        footer.addSubview(sessionPicker)
+        // Grammar suggestions panel: a vertical list shown between the text and
+        // the footer when the reviewer finds issues; the window grows to fit it.
+        grammarPanel.translatesAutoresizingMaskIntoConstraints = false
+        grammarPanel.orientation = .vertical
+        grammarPanel.alignment = .leading
+        grammarPanel.distribution = .fill
+        grammarPanel.spacing = 4
+        grammarPanel.isHidden = true
+        grammarPanel.clipsToBounds = true
+
+        // Coaching panel: a scrollable vertical stack (flipped document view so
+        // content pins to the top), hidden until ⌘K.
+        coachStack.orientation = .vertical
+        coachStack.alignment = .leading
+        coachStack.spacing = 6
+        coachStack.translatesAutoresizingMaskIntoConstraints = false
+        let coachDoc = FlippedView()
+        coachDoc.translatesAutoresizingMaskIntoConstraints = false
+        coachDoc.addSubview(coachStack)
+        coachScroll.translatesAutoresizingMaskIntoConstraints = false
+        coachScroll.drawsBackground = false
+        coachScroll.hasVerticalScroller = true
+        coachScroll.autohidesScrollers = true
+        coachScroll.borderType = .noBorder
+        coachScroll.documentView = coachDoc
+        coachScroll.isHidden = true
+        NSLayoutConstraint.activate([
+            coachDoc.leadingAnchor.constraint(equalTo: coachScroll.contentView.leadingAnchor),
+            coachDoc.trailingAnchor.constraint(equalTo: coachScroll.contentView.trailingAnchor),
+            coachDoc.topAnchor.constraint(equalTo: coachScroll.contentView.topAnchor),
+            coachStack.leadingAnchor.constraint(equalTo: coachDoc.leadingAnchor),
+            coachStack.trailingAnchor.constraint(equalTo: coachDoc.trailingAnchor),
+            coachStack.topAnchor.constraint(equalTo: coachDoc.topAnchor),
+            coachStack.bottomAnchor.constraint(equalTo: coachDoc.bottomAnchor),
+        ])
+
+        footer.addSubview(sessionLabel)
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
         footer.addSubview(dictateButton)
@@ -239,6 +333,8 @@ final class ComposerWindow: NSWindow {
 
         let container: NSView = blur
         container.addSubview(scroll)
+        container.addSubview(grammarPanel)
+        container.addSubview(coachScroll)
         container.addSubview(separator)
         container.addSubview(footer)
 
@@ -254,18 +350,40 @@ final class ComposerWindow: NSWindow {
         closeButton.imagePosition = .imageOnly
         closeButton.toolTip = "Close (Esc)"
         container.addSubview(closeButton)
+        // The coach picker shares the header row with × — the footer has no room
+        // once the coach's longer hints show.
+        container.addSubview(coachPicker)
         NSLayoutConstraint.activate([
             closeButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
             closeButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             closeButton.widthAnchor.constraint(equalToConstant: 18),
             closeButton.heightAnchor.constraint(equalToConstant: 18),
+            coachPicker.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            coachPicker.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
         ])
 
+        // The text area prefers a fixed height (priority high, not required, so a
+        // manual vertical window-resize can still stretch it). Without this the
+        // scroll view is the only unconstrained element in the vertical chain and
+        // greedily absorbs the window growth meant for the grammar panel —
+        // collapsing the panel to height 0 (the bug that hid the suggestions).
+        let scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 140)
+        scrollHeight.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            scroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 30), // below the header row
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            scroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -12),
+            scrollHeight,
+            scroll.bottomAnchor.constraint(equalTo: grammarPanel.topAnchor, constant: -8),
+
+            grammarPanel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            grammarPanel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            grammarPanel.bottomAnchor.constraint(equalTo: coachScroll.topAnchor),
+
+            coachScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            coachScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            coachScroll.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -10),
 
             separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
@@ -277,8 +395,9 @@ final class ComposerWindow: NSWindow {
             footer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
             footer.heightAnchor.constraint(equalToConstant: 18),
 
-            sessionPicker.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: -6),
-            sessionPicker.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: dictateButton.leadingAnchor, constant: -8),
             keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
             keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
@@ -288,6 +407,11 @@ final class ComposerWindow: NSWindow {
             hintLabel.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             hintLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
         ])
+
+        grammarPanelHeight = grammarPanel.heightAnchor.constraint(equalToConstant: 0)
+        grammarPanelHeight.isActive = true
+        coachPanelHeight = coachScroll.heightAnchor.constraint(equalToConstant: 0)
+        coachPanelHeight.isActive = true
     }
 
     // MARK: - Behavior
@@ -306,6 +430,7 @@ final class ComposerWindow: NSWindow {
         NSApp.activate(ignoringOtherApps: true)
         makeFirstResponder(textView)
         onShow?() // boost the session poll while we're open
+        refreshCoachPicker()
         // Follow the focused Warp tab live while the composer is open.
         lastWarpTitle = nil   // force the first poll to follow
         followTick()
@@ -315,8 +440,11 @@ final class ComposerWindow: NSWindow {
     func hide() {
         stopFollowTimer()
         onHide?() // drop the session poll back to idle cadence
-        if let cur = currentPID { drafts[cur] = textView.string } // preserve draft
+        if let cur = currentPID { drafts[cur] = textView.string; draftsDictated[cur] = liveDictated } // preserve draft
         textView.suggestion = nil
+        ghostCompleter.cancel()
+        clearGrammar()
+        dismissCoach()
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
         // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
@@ -330,7 +458,20 @@ final class ComposerWindow: NSWindow {
     func clear() {
         textView.string = ""
         textView.suggestion = nil
-        if let cur = currentPID { drafts[cur] = "" } // the prompt was sent
+        clearGrammar() // the sent prompt's suggestions don't belong to the empty draft
+        dismissCoach()
+        // Dictation mode stays on across sends; typing into the empty box turns it off.
+        if let cur = currentPID { drafts[cur] = ""; draftsDictated[cur] = liveDictated } // the prompt was sent
+    }
+
+    /// Drop any pending grammar review + its marks/panel. A suggestion belongs to
+    /// the exact draft it was computed from, so we clear it whenever the buffer is
+    /// replaced (send, or switching to another session's draft) to avoid showing a
+    /// fix that no longer matches the visible text.
+    private func clearGrammar() {
+        grammarReviewer.cancel()
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
     }
 
     // MARK: - Ghost text (inline word completion)
@@ -341,8 +482,170 @@ final class ComposerWindow: NSWindow {
     /// Runs on every text change: first apply contraction autocorrect (on a
     /// finished word), then refresh the word-completion ghost.
     private func handleTextChange() {
+        dismissCoach() // coaching describes the old text; editing returns to the draft
+        if textView.string.isEmpty { flushUnsentCheck(for: currentPID ?? 0) } // draft abandoned
         autocorrectContraction()
         updateGhost()
+        updateGrammar()
+    }
+
+    /// Grammar/naturalness review. Existing marks go stale the instant the text
+    /// changes, so clear them now and re-mark after the (debounced) review lands.
+    private func updateGrammar() {
+        // Marks + panel go stale the instant the text changes; clear now and
+        // re-populate after the (debounced) review lands.
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
+        let text = textView.string
+        grammarReviewer.review(text) { [weak self] spans in
+            guard let self, self.textView.string == text, self.coachState == nil else { return } // ignore stale
+            self.textView.setGrammarSpans(spans)
+            self.populateGrammarPanel(spans)
+        }
+    }
+
+    /// Rebuild the suggestions panel and grow/shrink the window to fit it.
+    private func populateGrammarPanel(_ spans: [GrammarSpan]) {
+        if Self.debug { fputs("TypeFlow: grammar panel populate spans=\(spans.count)\n", stderr) }
+        currentSpans = spans
+        grammarPanel.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let shown = Array(spans.prefix(5)) // cap the list; underlines still mark them all
+        var rows: [NSView] = []
+        // A "Fix all" header only earns its row when there's more than one issue.
+        if shown.count >= 2 { rows.append(makeFixAllRow(count: shown.count)) }
+        for (i, span) in shown.enumerated() { rows.append(makeGrammarRow(span, index: i)) }
+        for row in rows {
+            grammarPanel.addArrangedSubview(row)
+            // Activate the full-width constraint ONLY after the row joins
+            // grammarPanel — before that the two anchors share no common ancestor
+            // and `.isActive = true` throws, aborting the whole populate (the bug
+            // that left detection + underlines working but no panel).
+            row.widthAnchor.constraint(equalTo: grammarPanel.widthAnchor).isActive = true
+        }
+        grammarPanel.isHidden = rows.isEmpty
+        let n = CGFloat(rows.count)
+        setPanelHeight(rows.isEmpty ? 0 : n * 22 + max(0, n - 1) * 4)
+    }
+
+    /// Header row shown above the suggestions when there are 2+ issues: a count
+    /// on the left and a "Fix all" button that applies every fix at once.
+    private func makeFixAllRow(count: Int) -> NSView {
+        let label = NSTextField(labelWithString: "\(count) suggestions")
+        label.font = NSFont.systemFont(ofSize: 11)
+        label.textColor = .tertiaryLabelColor
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let fixAll = NSButton(title: "Fix all", target: self,
+                              action: #selector(grammarFixAllClicked))
+        fixAll.controlSize = .small
+        fixAll.bezelStyle = .rounded
+        fixAll.contentTintColor = .systemOrange
+        fixAll.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [label, fixAll])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        return row
+    }
+
+    /// One "original → correction · reason   [Fix]" row.
+    private func makeGrammarRow(_ span: GrammarSpan, index: Int) -> NSView {
+        let str = NSMutableAttributedString()
+        str.append(NSAttributedString(string: span.original, attributes: [
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .font: NSFont.systemFont(ofSize: 12)]))
+        str.append(NSAttributedString(string: "  →  ", attributes: [
+            .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 12)]))
+        str.append(NSAttributedString(string: span.correction, attributes: [
+            .foregroundColor: NSColor.systemOrange, // match the in-text underline
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium)]))
+        str.append(NSAttributedString(string: "   \(span.reason)", attributes: [
+            .foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.systemFont(ofSize: 11)]))
+
+        let label = NSTextField(labelWithAttributedString: str)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let fix = NSButton(title: "Fix", target: self, action: #selector(grammarFixClicked(_:)))
+        fix.tag = index
+        fix.controlSize = .small
+        fix.bezelStyle = .rounded
+        fix.contentTintColor = .systemOrange
+        fix.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [label, fix])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        // Width is constrained by the caller AFTER the row is added to grammarPanel
+        // (see populateGrammarPanel) — doing it here throws (no common ancestor yet).
+        row.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        return row
+    }
+
+    @objc private func grammarFixClicked(_ sender: NSButton) {
+        let i = sender.tag
+        guard i >= 0, i < currentSpans.count else { return }
+        applyGrammarSpan(currentSpans[i])
+    }
+
+    /// Apply every current fix in one go. Edits run right-to-left so each span's
+    /// absolute range is still valid when we reach it (edits to the right never
+    /// shift positions to the left), wrapped in one undo group so a single ⌘Z
+    /// reverts the whole batch. Each span is re-validated against the live text.
+    @objc private func grammarFixAllClicked() {
+        let ordered = currentSpans.sorted { $0.range.location > $1.range.location }
+        makeFirstResponder(textView)
+        textView.undoManager?.beginUndoGrouping()
+        for span in ordered {
+            let ns = textView.string as NSString
+            guard NSMaxRange(span.range) <= ns.length,
+                  ns.substring(with: span.range) == span.original else { continue }
+            textView.insertText(span.correction, replacementRange: span.range)
+        }
+        textView.undoManager?.endUndoGrouping()
+        // The edits fire handleTextChange → updateGrammar, which clears the marks
+        // and re-reviews; clear eagerly too so the panel doesn't flash stale rows.
+        textView.setGrammarSpans([])
+        populateGrammarPanel([])
+    }
+
+    /// Replace just this span with its correction — one undoable edit, the rest of
+    /// the prompt untouched. The text change re-runs the review for any remainder.
+    private func applyGrammarSpan(_ span: GrammarSpan) {
+        let ns = textView.string as NSString
+        guard NSMaxRange(span.range) <= ns.length,
+              ns.substring(with: span.range) == span.original else {
+            populateGrammarPanel([]); textView.setGrammarSpans([]); return // stale
+        }
+        makeFirstResponder(textView)
+        textView.insertText(span.correction, replacementRange: span.range)
+    }
+
+    /// Grow the window downward (top edge fixed) to make room for the panel.
+    private func setPanelHeight(_ h: CGFloat) {
+        let delta = h - panelExtraHeight
+        guard abs(delta) > 0.5 else { return }
+        panelExtraHeight = h
+        grammarPanelHeight.constant = h
+        growWindow(by: delta)
+        if Self.debug {
+            fputs("TypeFlow: setPanelHeight h=\(h) delta=\(delta) frameH=\(frame.size.height) panelFrame=\(grammarPanel.frame)\n", stderr)
+        }
+    }
+
+    /// Grow (or shrink) the window downward, keeping the top edge fixed.
+    private func growWindow(by delta: CGFloat) {
+        var f = frame
+        f.size.height += delta
+        f.origin.y -= delta
+        setFrame(f, display: true)
+        contentView?.layoutSubtreeIfNeeded()
     }
 
     /// When the user just typed a word boundary (space/punctuation) right after
@@ -391,9 +694,30 @@ final class ComposerWindow: NSWindow {
         let sel = textView.selectedRange()
         guard sel.length == 0, sel.location == ns.length else {
             textView.suggestion = nil
+            ghostCompleter.cancel()
             return
         }
-        textView.suggestion = wordCompleter.completion(in: textView.string, caret: sel.location)
+        // Mid-word → instant local word completion (NSSpellChecker, English).
+        if let word = wordCompleter.completion(in: textView.string, caret: sel.location) {
+            ghostCompleter.cancel()
+            textView.suggestion = word
+            return
+        }
+        // No word to finish (a boundary, or a complete word) → ask the on-device
+        // model for a short, context-aware continuation (Copilot-style, English,
+        // debounced). Clear the stale ghost now; the async callback fills it in
+        // only if the buffer is still exactly what we asked about (else it's stale).
+        textView.suggestion = nil
+        let prefix = textView.string
+        ghostCompleter.requestCompletion(prefix: prefix) { [weak self] suggestion in
+            guard let self else { return }
+            let current = self.textView.string
+            let caret = self.textView.selectedRange()
+            guard current == prefix,
+                  caret.length == 0, caret.location == (current as NSString).length
+            else { return }
+            self.textView.suggestion = suggestion.isEmpty ? nil : suggestion
+        }
     }
 
     /// If the caret moved off the end of the buffer (click, arrow keys), any
@@ -403,6 +727,7 @@ final class ComposerWindow: NSWindow {
         let sel = textView.selectedRange()
         if sel.length != 0 || sel.location != ns.length {
             textView.suggestion = nil
+            ghostCompleter.cancel()
         }
     }
 
@@ -410,42 +735,70 @@ final class ComposerWindow: NSWindow {
     /// sessions that have disappeared are discarded. Selection follows the
     /// current session if set, otherwise the supplied target.
     func setSessions(_ sessions: [ClaudeSession], targetPID: pid_t?) {
+        let previousPIDs = Set(self.sessions.map { $0.pid })
         self.sessions = sessions
         // Forget drafts for sessions that no longer exist.
         let alive = Set(sessions.map { $0.pid })
+        for pid in unsentChecks.keys where pid != 0 && !alive.contains(pid) { flushUnsentCheck(for: pid) }
         drafts = drafts.filter { alive.contains($0.key) }
+        tabNames = tabNames.filter { alive.contains($0.key) }
+        draftsDictated = draftsDictated.filter { alive.contains($0.key) }
         if let cur = currentPID, !alive.contains(cur) { currentPID = nil }
 
-        sessionPicker.removeAllItems()
         guard !sessions.isEmpty else {
-            sessionPicker.addItem(withTitle: "→ no Claude Code session")
-            sessionPicker.isEnabled = false
+            currentPID = nil
+            updateSessionLabel(targetPID: nil)
             return
         }
-        sessionPicker.isEnabled = true
-        // Sort newest-first so the implicit target sits at the top.
+        // A newly-spawned session becomes the current one — running `claude` in
+        // a terminal should focus that session here, just like a new terminal
+        // tab takes focus. `sorted` is newest-first, so this is the newest pid we
+        // hadn't seen before. Per-session drafts mean the switch loses no input;
+        // shouldAutoFocus only holds off while the user is mid-draft.
         let sorted = sessions.sorted(by: { $0.startTime > $1.startTime })
-        // PascalCase folder names; append the tty only to disambiguate collisions.
-        let names = sorted.map { Self.sessionName(for: $0) }
-        var counts: [String: Int] = [:]
-        for n in names { counts[n, default: 0] += 1 }
-        for (i, session) in sorted.enumerated() {
-            var label = names[i]
-            if (counts[names[i]] ?? 0) > 1 {
-                label += " (\((session.ttyPath as NSString).lastPathComponent))"
-            }
-            sessionPicker.addItem(withTitle: "claude · \(label)")
-            sessionPicker.lastItem?.representedObject = NSNumber(value: session.pid)
+        let newSession = sorted.first { !previousPIDs.contains($0.pid) }
+        if let newSession, shouldAutoFocus(newSession.pid) {
+            switchTo(newSession.pid) // sets currentPID + refreshes the label
+        } else if !isVisible {
+            // While the composer is open, followTick owns the label (it tracks
+            // the frontmost Warp tab — where the send actually lands). Writing it
+            // here too would fight that 0.4s loop and flicker a wrong name when
+            // the frontmost tab isn't the current session. Only set it when the
+            // composer is closed, so it's correct the moment it opens.
+            updateSessionLabel(targetPID: targetPID)
         }
-        if let pid = currentPID ?? targetPID { selectPicker(pid) }
     }
 
-    @objc private func sessionPickerChanged(_ sender: NSPopUpButton) {
-        guard let pidNumber = sender.selectedItem?.representedObject as? NSNumber
-        else { return }
-        let pid = pid_t(pidNumber.int32Value)
-        switchTo(pid)            // swap to that session's draft
-        onSessionSelected?(pid)
+    /// Refresh the footer indicator to name the session we're on — `currentPID`
+    /// if set, else the supplied target, else the newest. The tty is appended
+    /// ONLY when two sessions share a folder, so the right one is identifiable.
+    private func updateSessionLabel(targetPID: pid_t?) {
+        guard !sessions.isEmpty else {
+            sessionLabel.stringValue = "→ no Claude Code session"
+            return
+        }
+        let grouped = Dictionary(grouping: sessions, by: { Self.sessionName(for: $0) })
+        func label(for s: ClaudeSession) -> String {
+            if let tabName = tabNames[s.pid] { return tabName }
+            let name = Self.sessionName(for: s)
+            if (grouped[name]?.count ?? 0) > 1 {
+                return "\(name) (\((s.ttyPath as NSString).lastPathComponent))"
+            }
+            return name
+        }
+        let pid = currentPID ?? targetPID
+        let session = sessions.first(where: { $0.pid == pid })
+            ?? sessions.max(by: { $0.startTime < $1.startTime })
+        guard let session else { return }
+        sessionLabel.stringValue = "→ claude · \(label(for: session))"
+    }
+
+    /// Whether a newly-detected session should steal the composer's selection.
+    /// We never yank the buffer out from under an in-progress draft in the open
+    /// composer; otherwise (closed, or empty) the new session takes over.
+    private func shouldAutoFocus(_ pid: pid_t) -> Bool {
+        guard pid != currentPID else { return false }
+        return !(isVisible && !textView.string.isEmpty)
     }
 
     // MARK: - Session following & per-session drafts
@@ -454,31 +807,64 @@ final class ComposerWindow: NSWindow {
     /// first so nothing is lost. No-op if already on that session.
     private func switchTo(_ pid: pid_t) {
         guard pid != currentPID else { return }
-        if let cur = currentPID { drafts[cur] = textView.string }
+        if let cur = currentPID { drafts[cur] = textView.string; draftsDictated[cur] = liveDictated }
         currentPID = pid
         textView.string = drafts[pid] ?? ""
+        liveDictated = draftsDictated[pid] ?? false
+        refreshDictateButton()
         textView.suggestion = nil
-        selectPicker(pid)
+        clearGrammar() // the previous session's suggestions don't apply to this draft
+        dismissCoach()
+        updateSessionLabel(targetPID: pid)
         let end = (textView.string as NSString).length
         textView.setSelectedRange(NSRange(location: end, length: 0))
+        // Re-review the draft we just switched to (no-op if it's empty).
+        if !textView.string.isEmpty { updateGrammar() }
     }
 
-    private func selectPicker(_ pid: pid_t) {
-        if let item = sessionPicker.itemArray.first(where: {
-            ($0.representedObject as? NSNumber)?.int32Value == pid
-        }) {
-            sessionPicker.select(item)
+    /// Poll Warp's focused tab; act only when the title actually changes. The send
+    /// always lands in Warp's frontmost tab, so the footer mirrors that tab's
+    /// title — even if it has no claude session — so the label always names where
+    /// Enter will go. When the tab maps to a known claude session we also swap to
+    /// that session's draft.
+    @objc private func followTick() {
+        let title = WarpInspector.focusedWindowTitle()
+        // Prefer Warp's own record of the active tab: its cwd matches a session
+        // exactly, and its custom name is what the user sees in the tab list.
+        // claude rewrites the window title (spinner + summary), so the title is
+        // only a fallback.
+        let tab = WarpInspector.activeTab()
+        // Re-resolve EVERY tick, not just when the title string changes: a new
+        // `claude` session can start under an UNCHANGED Warp title (you switch to
+        // a tab, then run claude in it). If we early-returned on an unchanged
+        // title, the label would stay stuck on the raw tab name and never upgrade
+        // to "claude · <name>" once the session appears. switchTo / setSessionLabel
+        // are both idempotent, so re-running when nothing changed is a no-op.
+        let matched = tab?.cwd.flatMap { sessionMatching(cwd: $0) }
+            ?? title.flatMap { sessionMatching(warpTitle: $0) }
+        let key = "\(tab?.name ?? "")|\(tab?.cwd ?? "")|\(title ?? "")"
+        if Self.debug && key != lastWarpTitle {
+            fputs("TypeFlow: followTick tab=\(tab?.name ?? "nil") cwd=\(tab?.cwd ?? "nil") warpTitle=\(title ?? "nil")\n", stderr)
+        }
+        lastWarpTitle = key
+        if let pid = matched {
+            tabNames[pid] = tab?.name
+            switchTo(pid)
+            updateSessionLabel(targetPID: pid) // switchTo is a no-op for the same pid; a rename still shows
+        } else {
+            setSessionLabel(warpTitle: tab?.name ?? title)
         }
     }
 
-    /// Poll Warp's focused tab; follow it only when the title actually changes,
-    /// so a manual dropdown pick isn't immediately overridden by the poll.
-    @objc private func followTick() {
-        let title = WarpInspector.focusedWindowTitle()
-        guard title != lastWarpTitle else { return }
-        lastWarpTitle = title
-        guard let title, let pid = sessionMatching(warpTitle: title) else { return }
-        switchTo(pid)
+    /// Show where the send will land — the live Warp tab title — for a tab that
+    /// doesn't map to a detected claude session. Keeps the footer honest about
+    /// routing instead of leaving a stale name from the previous tab.
+    private func setSessionLabel(warpTitle: String?) {
+        if let t = warpTitle, !t.isEmpty {
+            sessionLabel.stringValue = "→ \(t)"
+        } else {
+            updateSessionLabel(targetPID: nil)
+        }
     }
 
     /// Match Warp's window title to a session. Warp prettifies titles — it
@@ -489,15 +875,30 @@ final class ComposerWindow: NSWindow {
     private func sessionMatching(warpTitle: String) -> pid_t? {
         let t = Self.normalize(warpTitle)
         guard !t.isEmpty else { return nil }
-        if let s = sessions.first(where: {
+        // Basename match (tightest). Auto-follow only when EXACTLY one session's
+        // folder matches the title; if two `claude` sessions share a folder the
+        // title can't tell them apart, so we return nil and let the user's manual
+        // dropdown pick stand instead of swapping to an arbitrary one.
+        let byLeaf = sessions.filter {
             guard let cwd = $0.cwd else { return false }
             return Self.normalize((cwd as NSString).lastPathComponent) == t
-        }) { return s.pid }
-        if let s = sessions.first(where: {
+        }
+        if byLeaf.count > 1 { return nil }
+        if let s = byLeaf.first { return s.pid }
+        // Ancestor-path fallback, same one-or-none rule.
+        let byAncestor = sessions.filter {
             guard let cwd = $0.cwd else { return false }
             return (cwd as NSString).pathComponents.contains { Self.normalize($0) == t }
-        }) { return s.pid }
-        return nil
+        }
+        if byAncestor.count > 1 { return nil }
+        return byAncestor.first?.pid
+    }
+
+    /// Exact cwd match against the active Warp tab's pane. Two sessions in the
+    /// same folder are ambiguous → nil (same one-or-none rule as titles).
+    private func sessionMatching(cwd: String) -> pid_t? {
+        let hits = sessions.filter { $0.cwd == cwd }
+        return hits.count == 1 ? hits.first?.pid : nil
     }
 
     private static func normalize(_ s: String) -> String {
@@ -549,27 +950,398 @@ final class ComposerWindow: NSWindow {
         followTimer = nil
     }
 
+    // MARK: - English coach (⌘K)
+    /// Debug only (`TYPEFLOW_DEMO_COACH=1`): open the composer with a canned coach
+    /// result so the panel layout can be checked (and screenshotted) without a
+    /// Codex call or a send.
+    func showDemoCoach() {
+        show()
+        let draft = "give me a markdown with the information for this lesson. Don't add extra information."
+        textView.string = draft
+        let r = CoachResult(
+            intent: "Ask for a Markdown document with this lesson's information, nothing extra.", score: 90,
+            native: "Give me a Markdown document with the information for this lesson. Don’t add anything extra.",
+            fixes: [
+                CoachFix(original: "give", correction: "Give", reason: "capitalize first word",
+                         category: "mechanics-punctuation-and-capitalization"),
+                CoachFix(original: "a markdown", correction: "a Markdown document", reason: "name the thing",
+                         category: "noun-phrase-structure"),
+                CoachFix(original: "extra information", correction: "anything extra", reason: "natural phrasing",
+                         category: "false-friends-and-calques"),
+            ],
+            why: "\"Markdown\" names the format; \"a Markdown document\" names the thing you want.",
+            pattern: "Ask for the thing, then the format: \"a Markdown document\".", spanishTransfer: "")
+        coachState = .result(r, draft: draft)
+        renderCoach()
+    }
+
+
+    /// Ask the coach about the current draft. Runs only on demand — each check
+    /// costs plan quota — and shows a loading row until the answer lands.
+    /// ⌘K on a draft that already has a quick result re-checks it with the deeper
+    /// (more natural, more expensive) model — the user decides when it's worth it.
+    private func startCoach() {
+        let draft = textView.string
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            NSSound.beep(); return
+        }
+        var deep = false
+        if case .result(let r, let d) = coachState, d == draft {
+            guard !EnglishCoach.isDeep(r.model) else { NSSound.beep(); return } // already deep
+            deep = true
+        }
+        textView.suggestion = nil
+        ghostCompleter.cancel()
+        clearGrammar() // the coach covers grammar too; one panel at a time
+        coachTask?.cancel()
+        coachState = .loading(draft: draft, deep: deep)
+        renderCoach()
+        coachTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.coach.check(draft, deep: deep)
+                guard !Task.isCancelled, self.textView.string == draft else { return }
+                self.coachState = .result(result, draft: draft)
+                self.unsentChecks[self.currentPID ?? 0] = ComposerSend(
+                    text: result.native,
+                    draft: draft.trimmingCharacters(in: .whitespacesAndNewlines),
+                    dictated: self.liveDictated, coach: result, corrected: false,
+                    cwd: self.sessions.first(where: { $0.pid == self.currentPID })?.cwd,
+                    destination: .unsent)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, self.textView.string == draft else { return }
+                self.coachState = .failed(error.localizedDescription)
+            }
+            self.renderCoach()
+        }
+    }
+
+    /// Log a session's pending ⌘K check as unsent — its draft won't be sent.
+    private func flushUnsentCheck(for pid: pid_t) {
+        guard let check = unsentChecks.removeValue(forKey: pid) else { return }
+        WingmanEnglishLog.record(check)
+    }
+
+    /// App quit: every pending check is abandoned.
+    func flushUnsentChecks() {
+        for pid in Array(unsentChecks.keys) { flushUnsentCheck(for: pid) }
+    }
+
+    private func dismissCoach() {
+        guard coachState != nil || coachTask != nil else { return }
+        coachTask?.cancel()
+        coachTask = nil
+        coach.cancel()
+        coachState = nil
+        renderCoach()
+    }
+
+    /// Rebuild the coaching panel for `coachState`, resize the window to fit, and
+    /// swap the footer hint to the keys that apply right now.
+    private func renderCoach() {
+        coachStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let width = max(200, frame.width - 40)
+        var rows: [NSView] = []
+        var hint = Self.defaultHint
+
+        var removals: [(range: NSRange, slip: Bool)] = []
+        switch coachState {
+        case nil:
+            break
+        case .loading(_, let deep):
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.startAnimation(nil)
+            let label = coachLabel(deep ? "Rewriting more naturally with \(CoachProvider.displayName(model: CoachProvider.current.deepModel))…" : "Checking your English with \(CoachProvider.displayName(model: CoachProvider.current.quickModel))…",
+                                   size: 12, color: .secondaryLabelColor)
+            let row = NSStackView(views: [spinner, label])
+            row.spacing = 8
+            rows.append(row)
+            hint = "⌥↵ send without waiting   ⎋ cancel"
+        case .failed(let message):
+            rows.append(coachLabel("Couldn't check: \(message)", size: 12, color: .systemRed, width: width))
+            hint = "↵ send   ⌘⇧C copy   ⌘K retry   ⎋ close panel"
+        case .result(let r, let draft):
+            rows += coachRows(r, draft: draft, width: width)
+            if !r.isTranslation && !r.isClean { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
+            let deeper = EnglishCoach.isDeep(r.model) ? "" : "   ⌘K deeper"
+            hint = r.isClean ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
+                : r.isTranslation ? "↵ send English   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
+                : "↵ send corrected   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
+        }
+
+        textView.setCoachRemovals(removals) // cleared whenever there's no result
+        for row in rows {
+            coachStack.addArrangedSubview(row)
+            // Full-width hairlines; constrained only once inside the stack (an
+            // anchor pair with no common ancestor throws — see populateGrammarPanel).
+            if row is SeparatorLine { row.widthAnchor.constraint(equalTo: coachStack.widthAnchor).isActive = true }
+        }
+        coachScroll.isHidden = rows.isEmpty
+        hintLabel.stringValue = hint
+        hintLabel.textColor = .tertiaryLabelColor // a pending "✓ Copied" flash ends here
+
+        // Measure the stack at the panel's width, cap it, and grow the window.
+        coachStack.layoutSubtreeIfNeeded()
+        let content = rows.isEmpty ? 0
+            : rows.reduce(0) { $0 + $1.fittingSize.height } + CGFloat(rows.count - 1) * coachStack.spacing
+        let h = rows.isEmpty ? 0 : min(content + 4, Self.coachMaxHeight)
+        let delta = h - coachExtraHeight
+        if abs(delta) > 0.5 {
+            coachExtraHeight = h
+            coachPanelHeight.constant = h
+            growWindow(by: delta)
+        }
+        coachScroll.documentView?.scroll(.zero)
+    }
+
+    /// The "track changes" layout: header (score + what the coach understood),
+    /// the draft with its changes marked inline, one compact line per change,
+    /// the learning line, and the plan's focus.
+    private func coachRows(_ r: CoachResult, draft: String, width: CGFloat) -> [NSView] {
+        var rows: [NSView] = []
+
+        let header = NSMutableAttributedString()
+        let scoreText = r.score.map { "\($0)/100" } ?? "Translation"
+        // Neutral: green/yellow/red are reserved for the changes themselves.
+        header.append(NSAttributedString(string: scoreText, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: NSColor.labelColor]))
+        let modelName = CoachProvider.displayName(model: r.model)
+        if !modelName.isEmpty {
+            let deeper = EnglishCoach.isDeep(r.model) ? ", deeper check" : ""
+            header.append(NSAttributedString(string: "  · \(modelName)\(deeper)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
+        }
+        if !r.intent.isEmpty {
+            // The coach's reading of the draft — if it's wrong, the rewrite is too.
+            header.append(NSAttributedString(string: "   Understood: " + r.intent, attributes: [
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        rows.append(attributedLabel(header, width: width))
+
+        if r.isClean {
+            rows.append(coachLabel("✓ Sounds natural. No changes needed.", size: 13, color: .systemGreen, width: width))
+            return rows
+        }
+
+        // The draft is already in the text box above, with the coach's removals
+        // marked there in red (see renderCoach). The panel opens with what Enter
+        // sends: the corrected version, additions in green. A translation shares
+        // no words with the Spanish, so it's shown plain.
+        rows.append(SeparatorLine())
+        rows.append(coachLabel(r.isTranslation ? "IN ENGLISH" : "CORRECTED", size: 10, weight: .semibold,
+                               color: .tertiaryLabelColor))
+        let sides = r.isTranslation ? nil : TrackChanges.sides(from: draft, to: r.native, size: 13)
+        let corrected = sides.map { attributedLabel($0.corrected, width: width) }
+            ?? coachLabel(r.native, size: 14, weight: .medium, color: .labelColor, width: width)
+        corrected.isSelectable = true
+        rows.append(corrected)
+
+        // Plan + history from wingman-english's vault (local files, no model call).
+        let insights = CoachInsights.snapshot()
+        if !r.fixes.isEmpty {
+            rows.append(SeparatorLine())
+            rows.append(coachLabel("CHANGES", size: 10, weight: .semibold, color: .tertiaryLabelColor))
+            var seenNow: [String: Int] = [:]
+            for fix in r.fixes.prefix(8) {
+                // A severity dot (red mistake / yellow slip); the text itself stays neutral.
+                let slip = TrackChanges.slipCategories.contains(fix.category)
+                let str = NSMutableAttributedString(string: "● ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: slip ? TrackChanges.slipColor : NSColor.systemRed])
+                if fix.correction.isEmpty {
+                    str.append(NSAttributedString(string: fix.original, attributes: [
+                        .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor,
+                        .strikethroughStyle: NSUnderlineStyle.single.rawValue]))
+                } else {
+                    str.append(NSAttributedString(string: fix.correction, attributes: [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.labelColor]))
+                }
+                str.append(NSAttributedString(string: "    \(fix.reason) · \(CoachInsights.label(fix.category))", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+                if let insights {
+                    seenNow[fix.category, default: 0] += 1
+                    var badges: [String] = []
+                    if insights.targetForms.contains(fix.category) { badges.append("🎯") }
+                    let total = insights.weekCounts[fix.category, default: 0] + seenNow[fix.category]!
+                    if total >= CoachInsights.repeatThreshold, fix.category != "l1-switch" {
+                        badges.append("↻ \(CoachInsights.ordinal(total)) this week")
+                    }
+                    if !badges.isEmpty {
+                        str.append(NSAttributedString(string: "    " + badges.joined(separator: "  "), attributes: [
+                            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.systemPurple]))
+                    }
+                }
+                rows.append(attributedLabel(str, width: width))
+            }
+        }
+
+        if !r.pattern.isEmpty || !r.why.isEmpty || !r.spanishTransfer.isEmpty {
+            rows.append(SeparatorLine())
+            if !r.pattern.isEmpty {
+                rows.append(coachLabel("💡 " + r.pattern, size: 13, weight: .semibold, color: .labelColor, width: width))
+            }
+            if !r.why.isEmpty {
+                rows.append(coachLabel(r.why, size: 12, color: .secondaryLabelColor, width: width))
+            }
+            if !r.spanishTransfer.isEmpty {
+                rows.append(coachLabel("From Spanish: " + r.spanishTransfer, size: 11,
+                                       color: .tertiaryLabelColor, width: width))
+            }
+        }
+        if let insights, !insights.targetForms.isEmpty {
+            let forms = insights.targetForms.map { insights.qualifiers[$0] ?? CoachInsights.label($0) }
+                .joined(separator: " · ")
+            rows.append(coachLabel("🎯 Focus\(insights.planIsDraft ? " (draft plan)" : ""): " + forms,
+                                   size: 11, color: .systemPurple, width: width))
+        }
+        return rows
+    }
+
+    private func attributedLabel(_ text: NSAttributedString, width: CGFloat) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.attributedStringValue = text
+        label.isSelectable = false
+        label.preferredMaxLayoutWidth = width
+        return label
+    }
+
+    private func coachLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
+                            color: NSColor, width: CGFloat? = nil) -> NSTextField {
+        let label = width == nil ? NSTextField(labelWithString: text)
+                                 : NSTextField(wrappingLabelWithString: text)
+        label.font = NSFont.systemFont(ofSize: size, weight: weight)
+        label.textColor = color
+        label.isSelectable = false
+        if let width { label.preferredMaxLayoutWidth = width }
+        return label
+    }
+
     // MARK: - Keyboard
 
     /// Enter submission goes through ComposerTextDelegate; Escape is handled
     /// here because the text view doesn't intercept it.
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape
-            hide()
+            handleEscape()
             return
         }
         super.keyDown(with: event)
     }
 
+    /// ⌘K → check the draft with the English coach.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "k" {
+            startCoach()
+            return true
+        }
+        if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "c" {
+            copyForElsewhere()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Esc closes the coaching panel first (back to editing); otherwise the composer.
+    private func handleEscape() {
+        if coachState != nil {
+            dismissCoach()
+            makeFirstResponder(textView)
+        } else {
+            hide()
+        }
+    }
+
+    /// Enter. With a coaching result showing, sends the native-US version (or the
+    /// draft itself when the coach found nothing to fix). While a check is still
+    /// running, Enter waits — ⌥↵ sends the draft as-is without waiting.
     @objc func submit() {
-        let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch coachState {
+        case .loading:
+            NSSound.beep()
+        case .result(let r, let draft) where draft == textView.string && !r.isClean:
+            send(r.native, coach: r, corrected: true)
+        default:
+            send(textView.string, coach: currentCoachResult, corrected: false)
+        }
+    }
+
+    /// ⌥Enter while coaching: send the draft exactly as written.
+    private func submitOriginal() {
+        send(textView.string, coach: currentCoachResult, corrected: false)
+    }
+
+    /// ⌘⇧C: put the text on the clipboard instead of sending it to Claude — for a
+    /// quick correction to paste into another app. Same choice as Enter (the
+    /// coach's version when there's a correction, else the draft). Like a send,
+    /// the draft clears; with "keep open" on the composer stays up for the next
+    /// one, otherwise it closes so focus returns to the previous app.
+    private func copyForElsewhere() {
+        let (raw, coach, corrected): (String, CoachResult?, Bool)
+        switch coachState {
+        case .loading:
+            NSSound.beep(); return
+        case .result(let r, let draft) where draft == textView.string && !r.isClean:
+            (raw, coach, corrected) = (r.native, r, true)
+        default:
+            (raw, coach, corrected) = (textView.string, currentCoachResult, false)
+        }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { NSSound.beep(); return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        WingmanEnglishLog.record(ComposerSend(
+            text: text,
+            draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            dictated: liveDictated, coach: coach, corrected: corrected,
+            cwd: nil, destination: .clipboard))
+        unsentChecks[currentPID ?? 0] = nil
+        clear()
+        if keepOpen {
+            makeFirstResponder(textView)
+            flashHint("✓ Copied — paste it anywhere with ⌘V")
+        } else {
+            hide()
+        }
+    }
+
+    /// Briefly replace the footer hint with a confirmation, then restore it.
+    private func flashHint(_ message: String) {
+        hintLabel.stringValue = message
+        hintLabel.textColor = .systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.hintLabel.stringValue == message else { return }
+            self.hintLabel.textColor = .tertiaryLabelColor
+            self.hintLabel.stringValue = Self.defaultHint
+        }
+    }
+
+    /// The coach's result, if it was computed for exactly the visible draft.
+    private var currentCoachResult: CoachResult? {
+        if case .result(let r, let draft) = coachState, draft == textView.string { return r }
+        return nil
+    }
+
+    private func send(_ raw: String, coach: CoachResult?, corrected: Bool) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             NSSound.beep()
             return
         }
+        let send = ComposerSend(
+            text: text,
+            draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            dictated: liveDictated, coach: coach, corrected: corrected,
+            cwd: sessions.first(where: { $0.pid == currentPID })?.cwd)
         // If the send failed (e.g. Warp not running), keep the text and the
         // window so the user doesn't lose their prompt.
-        guard onSubmit?(text) == true else { return }
+        guard onSubmit?(send) == true else { return }
+        unsentChecks[currentPID ?? 0] = nil
         clear()
         if keepOpen {
             // The send activates Warp; re-focus the composer once it has landed
@@ -585,6 +1357,51 @@ final class ComposerWindow: NSWindow {
         }
     }
 
+    // MARK: - Coach picker
+
+    /// A pull-down's first item is its title; the rest is the menu: one section
+    /// per provider/account, one row per model, each row a complete choice.
+    private func refreshCoachPicker() {
+        let menu = coachPicker.menu!
+        menu.removeAllItems()
+        let current = CoachProvider.current
+        menu.addItem(withTitle: "⌘K  " + current.shortLabel, action: nil, keyEquivalent: "")
+
+        func section(_ title: String, _ choices: [CoachProvider]) {
+            if menu.items.count > 1 { menu.addItem(.separator()) }
+            menu.addItem(.sectionHeader(title: title))
+            for choice in choices {
+                let item = menu.addItem(withTitle: choice.menuTitle,
+                                        action: #selector(pickCoachProvider(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = choice
+                item.subtitle = choice.menuSubtitle
+                item.state = choice == current ? .on : .off
+            }
+        }
+        section("Codex — ChatGPT plan", [.codex])
+
+        var accounts = CoachProvider.claudeAccounts()
+        if case .claude(let a, _) = current, !accounts.contains(a) { accounts.append(a) } // since removed
+        for a in accounts {
+            section("Claude — \(a)", CoachProvider.ClaudeModel.allCases.map { .claude(account: a, model: $0) })
+        }
+        if CoachProvider.antigravityInstalled || current == .antigravity {
+            section("Antigravity — Google", [.antigravity])
+        }
+    }
+
+    @objc private func pickCoachProvider(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? CoachProvider else { return }
+        CoachProvider.current = provider
+        refreshCoachPicker()
+        makeFirstResponder(textView)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === coachPicker.menu { refreshCoachPicker() }
+    }
+
     @objc private func keepOpenToggled(_ sender: NSButton) {
         keepOpen = (sender.state == .on)
         makeFirstResponder(textView) // keep typing focus after clicking the box
@@ -593,8 +1410,18 @@ final class ComposerWindow: NSWindow {
     @objc private func startDictationClicked() {
         // startDictation: is the selector the system dictation shortcut invokes;
         // calling it on the focused text view starts Apple dictation in the box.
+        // Mark this draft as dictated so the send carries the ;;v marker and
+        // the observer runs its dictation-misrecognition + naturalness analysis.
+        liveDictated = true
+        refreshDictateButton()
         makeFirstResponder(textView)
         textView.perform(Selector(("startDictation:")), with: nil)
+    }
+
+    /// Sync the mic button tint with the dictated state — it glows accent when the
+    /// current draft will be sent as voice (;;v), neutral otherwise.
+    private func refreshDictateButton() {
+        dictateButton.contentTintColor = liveDictated ? .controlAccentColor : .tertiaryLabelColor
     }
 }
 
@@ -602,13 +1429,22 @@ final class ComposerWindow: NSWindow {
 ///   - Tab          → accept the inline ghost suggestion (if showing)
 ///   - Return       → submit
 ///   - Shift+Return → insert newline
-///   - Escape       → dismiss ghost, else close the composer
+///   - Option+Return → while coaching, send the draft as written
+///   - Escape       → dismiss ghost, else close coaching, else close the composer
 ///
 /// Escape needs explicit handling because NSTextView normally maps it to
 /// `cancelOperation:` (used to dismiss completion popups) and swallows the
 /// event before it can reach the window's keyDown override.
+/// Document view for the coaching scroll view — flipped so content pins to the top.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
     var onSubmit: (() -> Void)?
+    /// ⌥Return while the coaching panel is up: send the draft as written.
+    var onSubmitOriginal: (() -> Void)?
+    var isCoachShowing: (() -> Bool)?
     var onCancel: (() -> Void)?
     var onTextChanged: (() -> Void)?
     var onSelectionChanged: (() -> Void)?
@@ -632,11 +1468,23 @@ final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
             // plain Return (it isn't given a distinct insertLineBreak: binding) —
             // so we disambiguate via the triggering event's modifier flags.
             ghost?.suggestion = nil
-            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+            let mods = NSApp.currentEvent?.modifierFlags ?? []
+            if mods.contains(.shift) {
                 textView.insertText("\n", replacementRange: textView.selectedRange())
                 return true
             }
+            if mods.contains(.option), isCoachShowing?() == true {
+                onSubmitOriginal?()
+                return true
+            }
             onSubmit?()
+            return true
+        case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+            // ⌥Return arrives here. While coaching it means "send mine";
+            // otherwise keep the default (insert a newline).
+            guard isCoachShowing?() == true else { return false }
+            ghost?.suggestion = nil
+            onSubmitOriginal?()
             return true
         case #selector(NSResponder.insertLineBreak(_:)):
             // Kept in case a key-binding config does route Shift+Return here;

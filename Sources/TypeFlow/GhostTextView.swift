@@ -22,6 +22,50 @@ final class GhostTextView: NSTextView {
         }
     }
 
+    /// Grammar / naturalness issues to underline (set via `setGrammarSpans`).
+    private(set) var grammarSpans: [GrammarSpan] = [] {
+        didSet { if grammarSpans != oldValue { needsDisplay = true } }
+    }
+
+    /// Replace the underlined grammar spans and refresh the hover tooltips that
+    /// preview each suggestion. Spans whose range falls outside the buffer are
+    /// dropped (stale after an edit).
+    /// Marks what the coach removed, in place: red and struck through. Temporary
+    /// attributes are display-only — the text, its undo stack, and what gets sent
+    /// are untouched. Pass [] to clear.
+    func setCoachRemovals(_ ranges: [(range: NSRange, slip: Bool)]) {
+        guard let lm = layoutManager else { return }
+        let length = textStorage?.length ?? 0
+        let all = NSRange(location: 0, length: length)
+        lm.removeTemporaryAttribute(.strikethroughStyle, forCharacterRange: all)
+        lm.removeTemporaryAttribute(.strikethroughColor, forCharacterRange: all)
+        lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: all)
+        // Yellow = a slip (capitals, punctuation); red = a language error.
+        for (r, slip) in ranges where NSMaxRange(r) <= length {
+            let color = slip ? TrackChanges.slipColor : NSColor.systemRed
+            lm.addTemporaryAttributes([
+                .foregroundColor: color,
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .strikethroughColor: color,
+            ], forCharacterRange: r)
+        }
+    }
+
+    func setGrammarSpans(_ spans: [GrammarSpan]) {
+        let length = textStorage?.length ?? 0
+        grammarSpans = spans.filter { NSMaxRange($0.range) <= length }
+        removeAllToolTips()
+        guard let lm = layoutManager, let tc = textContainer else { return }
+        for span in grammarSpans {
+            let glyphRange = lm.glyphRange(forCharacterRange: span.range, actualCharacterRange: nil)
+            var rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            let tip = "\(span.original) → \(span.correction)  ·  \(span.reason)" as NSString
+            addToolTip(rect, owner: tip, userData: nil)
+        }
+    }
+
     private var ghostAttributes: [NSAttributedString.Key: Any] {
         [.font: font ?? .systemFont(ofSize: 16),
          .foregroundColor: NSColor.placeholderTextColor] // adapts to light/dark
@@ -29,7 +73,32 @@ final class GhostTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        drawGrammarUnderlines()
         drawGhost()
+    }
+
+    /// Draw a thick orange underline beneath each flagged span — visually
+    /// distinct from the system's red spell-check squiggle. Multi-line spans are
+    /// handled per visual line via `enumerateEnclosingRects`.
+    private func drawGrammarUnderlines() {
+        guard !grammarSpans.isEmpty, let lm = layoutManager, let tc = textContainer else { return }
+        NSColor.systemOrange.setStroke()
+        let origin = textContainerOrigin
+        for span in grammarSpans {
+            let glyphRange = lm.glyphRange(forCharacterRange: span.range, actualCharacterRange: nil)
+            lm.enumerateEnclosingRects(
+                forGlyphRange: glyphRange,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: tc
+            ) { rect, _ in
+                let y = rect.maxY + origin.y - 1
+                let path = NSBezierPath()
+                path.lineWidth = 2
+                path.move(to: NSPoint(x: rect.minX + origin.x, y: y))
+                path.line(to: NSPoint(x: rect.maxX + origin.x, y: y))
+                path.stroke()
+            }
+        }
     }
 
     private func drawGhost() {
@@ -61,6 +130,21 @@ final class GhostTextView: NSTextView {
         }
         return NSPoint(x: rect.minX + textContainerOrigin.x,
                        y: rect.minY + textContainerOrigin.y)
+    }
+
+    /// Called when a printable key is typed into an empty buffer. Dictation never
+    /// arrives via keyDown, so this means the next message is being typed.
+    var onTypingIntoEmpty: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if string.isEmpty,
+           event.modifierFlags.intersection([.command, .control]).isEmpty,
+           let chars = event.characters, chars.unicodeScalars.contains(where: {
+               CharacterSet.alphanumerics.union(.punctuationCharacters).contains($0)
+           }) {
+            onTypingIntoEmpty?()
+        }
+        super.keyDown(with: event)
     }
 
     // Keep the ghost in sync when the caret/selection moves (e.g. arrow keys).

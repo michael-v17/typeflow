@@ -7,11 +7,27 @@
 #     → Apple dictation silently fails in the composer
 #   - persist the Accessibility grant across rebuilds (TCC keys on bundle id)
 #
-# Wrapping the binary in TypeFlow.app fixes both. Usage:  ./scripts/make-app.sh [debug|release]
+# Wrapping the binary in TypeFlow.app fixes both.
+#
+# Usage:  ./scripts/make-app.sh [debug|release] [--no-install]
+#
+# By default this also installs the bundle to /Applications and relaunches it,
+# so a rebuild always updates the app you actually run (the login item points at
+# /Applications, NOT the repo-local TypeFlow.app — they drift otherwise). Pass
+# --no-install to just build the local bundle without touching /Applications.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CONFIG="${1:-release}"
+CONFIG="release"
+INSTALL=1
+for arg in "$@"; do
+    case "$arg" in
+        debug|release) CONFIG="$arg" ;;
+        --no-install)  INSTALL=0 ;;
+        --install)     INSTALL=1 ;;
+        *) echo "unknown argument: $arg (expected debug|release|--no-install)" >&2; exit 2 ;;
+    esac
+done
 swift build -c "$CONFIG"
 BIN=".build/$CONFIG/TypeFlow"
 
@@ -51,8 +67,22 @@ PLIST
 IDENTITY="TypeFlow Self-Signed"
 if security find-identity -p codesigning | grep -q "$IDENTITY"; then
     codesign --force --sign "$IDENTITY" --identifier com.michaelv.typeflow "$APP"
-    echo "Built $APP ($CONFIG), signed with '$IDENTITY'. Launch with: open $APP"
+    echo "Built $APP ($CONFIG), signed with '$IDENTITY'."
 else
     codesign --force --sign - "$APP"
-    echo "Built $APP ($CONFIG), AD-HOC signed (run scripts/make-cert.sh for a stable identity). Launch with: open $APP"
+    echo "Built $APP ($CONFIG), AD-HOC signed (run scripts/make-cert.sh for a stable identity)."
+fi
+
+if [ "$INSTALL" -eq 1 ]; then
+    # Install to /Applications and relaunch, so the app you run is always the one
+    # you just built. ditto preserves the code signature (so the Accessibility /
+    # Microphone grants — keyed on bundle id + signing identity — carry over).
+    DEST="/Applications/TypeFlow.app"
+    pkill -f 'TypeFlow.app/Contents/MacOS/TypeFlow' 2>/dev/null || true
+    rm -rf "$DEST"
+    ditto "$APP" "$DEST"
+    open "$DEST"
+    echo "Installed to $DEST and relaunched."
+else
+    echo "Skipped install (--no-install). Launch the local bundle with: open $APP"
 fi

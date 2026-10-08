@@ -17,22 +17,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hotKey: HotKey!
     var statusItem: NSStatusItem!
 
+    func applicationWillTerminate(_ notification: Notification) {
+        composer.flushUnsentChecks()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        composer = ComposerWindow { [weak self] text in
-            self?.sendToClaude(text) ?? false
+        composer = ComposerWindow { [weak self] send in
+            self?.sendToClaude(send) ?? false
         }
-        composer.onSessionSelected = { [weak self] pid in
-            self?.watcher.preferredPID = pid
-            self?.refreshStatus(sessions: self?.watcher.sessions ?? [])
-        }
-
         watcher = ProcessWatcher()
         watcher.onChange = { [weak self] sessions in
             self?.refreshStatus(sessions: sessions)
         }
         watcher.start()
+        if ProcessInfo.processInfo.environment["TYPEFLOW_DEMO_COACH"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.composer.showDemoCoach() }
+        }
 
         // Poll fast only while the composer is open; idle slowly otherwise.
         composer.onShow = { [weak self] in self?.watcher.boost() }
@@ -134,15 +136,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Returns true if the prompt was sent. False lets the composer keep the
     /// text (and stay open) instead of clearing on a failed send.
     @discardableResult
-    private func sendToClaude(_ text: String) -> Bool {
+    private func sendToClaude(_ send: ComposerSend) -> Bool {
         // v2: send into Warp's Rich Input via keystroke synthesis instead of
         // writing into the claude PTY directly. Rich Input handles paste /
         // edit / submit natively, so we sidestep every claude-CLI input quirk.
         // Side effect: we send to whichever Warp tab is frontmost, not to a
-        // specific tty — the session picker is now a visual indicator only.
+        // specific tty — the footer label is a read-only indicator of that tab.
         // (Full session-aware tab focusing is a future AX-traversal task.)
         do {
-            try WarpInjector.send(text)
+            try WarpInjector.send(send.text, marker: send.marker)
+            WingmanEnglishLog.record(send)
             return true
         } catch let error as WarpInjector.InjectError {
             NSSound.beep()

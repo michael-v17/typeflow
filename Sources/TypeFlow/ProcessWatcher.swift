@@ -27,7 +27,8 @@ final class ProcessWatcher {
 
     /// Manual override: when set and still alive, this pid wins over the
     /// most-recently-started heuristic. Cleared automatically when the
-    /// selected session disappears.
+    /// selected session disappears, or when a newer session is started (the
+    /// `claude` you just launched supersedes a stale pick).
     var preferredPID: pid_t?
 
     /// Set TYPEFLOW_DEBUG=1 in the environment to see watcher diagnostics on stderr.
@@ -78,7 +79,13 @@ final class ProcessWatcher {
     private func refresh() {
         let current = Self.findClaudeProcesses()
         if current != sessions {
+            let previousPIDs = Set(sessions.map { $0.pid })
             sessions = current
+            // A freshly-started session supersedes a stale manual pick, so the
+            // default target follows the `claude` the user just launched.
+            if current.contains(where: { !previousPIDs.contains($0.pid) }) {
+                preferredPID = nil
+            }
             // Drop a stale manual pick if the underlying session is gone.
             if let pid = preferredPID, !current.contains(where: { $0.pid == pid }) {
                 preferredPID = nil
