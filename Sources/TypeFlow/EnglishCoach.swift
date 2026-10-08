@@ -24,6 +24,8 @@ struct CoachResult: Codable, Equatable {
     let spanishTransfer: String
     /// Which model produced this (set after decoding; not part of the schema).
     var model = ""
+    /// Who ran it — `CoachProvider.logID` (set after decoding; not part of the schema).
+    var provider = ""
 
     enum CodingKeys: String, CodingKey {
         case intent, score, native, fixes, why, pattern
@@ -154,6 +156,17 @@ enum CoachProvider: Hashable {
         }
     }
 
+    /// Logged as `coach_provider` so wingman-english can tell who made each
+    /// suggestion: "codex", "claude:<account>", "antigravity". A future
+    /// on-device model gets a "local:<runtime>" id (e.g. "local:ollama").
+    var logID: String {
+        switch self {
+        case .codex: return "codex"
+        case .claude(let account, _): return "claude:\(account)"
+        case .antigravity: return "antigravity"
+        }
+    }
+
     /// Footer title: what the next ⌘K will use.
     var shortLabel: String {
         switch self {
@@ -259,6 +272,7 @@ final class EnglishCoach {
         }
         var cleaned = Self.cleaned(result)
         cleaned.model = model
+        cleaned.provider = provider.logID
         return cleaned
     }
 

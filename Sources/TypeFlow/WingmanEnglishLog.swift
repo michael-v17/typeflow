@@ -73,11 +73,15 @@ enum WingmanEnglishLog {
         let sentText: String?
         let coach: CoachResult
         let coachModel: String
+        /// `CoachProvider.logID`; a "local:" prefix means an on-device model.
+        /// Omitted when unknown (the demo result).
+        let coachProvider: String?
 
         enum CodingKeys: String, CodingKey {
             case ts, cwd, kind, sent, destination, modality, authorship, draft, coach
             case sentText = "sent_text"
             case coachModel = "coach_model"
+            case coachProvider = "coach_provider"
         }
     }
 
@@ -95,7 +99,7 @@ enum WingmanEnglishLog {
             destination: send.destination,
             modality: send.dictated ? "spoken" : "written",
             draft: send.draft, sentText: send.destination == .unsent ? nil : send.text, coach: coach,
-            coachModel: coach.model)
+            coachModel: coach.model, coachProvider: coach.provider.isEmpty ? nil : coach.provider)
         do {
             let dir = vault.appendingPathComponent("corpus/typeflow", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
