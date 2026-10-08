@@ -385,7 +385,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         replyButton.attributedTitle = NSAttributedString(string: "Reply to copied message  ⌘⇧V", attributes: [
             .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
         replyButton.contentTintColor = .secondaryLabelColor
-        replyButton.toolTip = "Paste the message you're answering — ⌘K then helps you reply to it"
+        replyButton.toolTip = "Paste the message you're answering (text or a screenshot) — ⌘K then helps you reply to it"
         replyButton.target = self
         replyButton.action = #selector(pasteAsContext)
         container.addSubview(replyButton)
@@ -528,7 +528,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     /// ⌘⇧V / the header button: the clipboard's text becomes the message to answer.
+    /// A screenshot (or a copied image file) is read on-device first.
     @objc private func pasteAsContext() {
+        if ScreenText.clipboardIsImageOnly(), let image = ScreenText.clipboardImage() {
+            readScreenshot(image)
+            return
+        }
         let text = NSPasteboard.general.string(forType: .string)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !text.isEmpty else {
@@ -538,6 +543,28 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         setContext(ReplyContext(text: text, source: .text))
         makeFirstResponder(textView)
+    }
+
+    /// OCR runs off the main thread (~0.5 s); the result lands only if the user
+    /// is still on the same session.
+    private func readScreenshot(_ image: CGImage) {
+        let pid = currentPID
+        hintLabel.stringValue = "Reading the screenshot…"
+        hintLabel.textColor = .secondaryLabelColor
+        Task { [weak self] in
+            let text = (try? await ScreenText.recognize(image))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let self, self.currentPID == pid else { return }
+            self.hintLabel.textColor = .tertiaryLabelColor
+            self.hintLabel.stringValue = Self.defaultHint
+            guard !text.isEmpty else {
+                NSSound.beep()
+                self.flashHint("No text found in that screenshot", color: .secondaryLabelColor)
+                return
+            }
+            self.setContext(ReplyContext(text: text, source: .screenshot))
+            self.makeFirstResponder(self.textView)
+        }
     }
 
     @objc private func removeContext() {
@@ -1474,6 +1501,13 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "v" {
             pasteAsContext()
+            return true
+        }
+        // The draft is plain text and can't take an image, so ⌘V of a screenshot
+        // means "reply to this".
+        if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "v",
+           ScreenText.clipboardIsImageOnly(), let image = ScreenText.clipboardImage() {
+            readScreenshot(image)
             return true
         }
         return super.performKeyEquivalent(with: event)

@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshStatus(sessions: sessions)
         }
         watcher.start()
+        ScreenText.warmUp() // so the first pasted screenshot doesn't wait ~65 s
         if let demo = ProcessInfo.processInfo.environment["TYPEFLOW_DEMO_COACH"], demo == "1" || demo == "reply" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.composer.showDemoCoach(reply: demo == "reply")
