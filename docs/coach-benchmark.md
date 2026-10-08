@@ -4,8 +4,9 @@ Which model should run the ⌘K English coach? Measured 2026-10-07, the day Clau
 Rerun when a new model ships or a provider changes its CLI.
 
 **Decision: keep `gpt-6-luna` (Codex, ChatGPT plan) as the default and `gpt-6-sol` as ⌘K-again.**
-No Claude or Apple provider added. If one is ever needed (e.g. a fallback when the ChatGPT
-allowance runs out), Sonnet 5.5 at low effort is the only Claude candidate worth it.
+No Apple provider. **Update 2026-10-08:** a Claude fallback was added for when the Codex budget
+runs low — menu bar → ⌘K Coach → a Claude account. The owner picked Haiku 5.5 at medium for the quick
+check (Sonnet 5.5 low for ⌘K again); Luna stays the default.
 
 ## Method
 

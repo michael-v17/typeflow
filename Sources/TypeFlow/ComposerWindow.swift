@@ -12,7 +12,7 @@ final class ComposerWindow: NSWindow {
     private var currentSpans: [GrammarSpan] = []
     /// How much window height the panel currently adds (0 when there are no issues).
     private var panelExtraHeight: CGFloat = 0
-    /// On-demand English coaching (⌘K) via Codex, shown in its own panel below
+    /// On-demand English coaching (⌘K) via Codex or Claude, shown in its own panel below
     /// the grammar suggestions. Scrolls when the coaching runs long.
     private let coach = EnglishCoach()
     private enum CoachState {
@@ -960,7 +960,7 @@ final class ComposerWindow: NSWindow {
 
 
     /// Ask the coach about the current draft. Runs only on demand — each check
-    /// costs Codex quota — and shows a loading row until the answer lands.
+    /// costs plan quota — and shows a loading row until the answer lands.
     /// ⌘K on a draft that already has a quick result re-checks it with the deeper
     /// (more natural, more expensive) model — the user decides when it's worth it.
     private func startCoach() {
@@ -970,7 +970,7 @@ final class ComposerWindow: NSWindow {
         }
         var deep = false
         if case .result(let r, let d) = coachState, d == draft {
-            guard r.model != EnglishCoach.deepModel else { NSSound.beep(); return } // already deep
+            guard !EnglishCoach.isDeep(r.model) else { NSSound.beep(); return } // already deep
             deep = true
         }
         textView.suggestion = nil
@@ -1038,7 +1038,7 @@ final class ComposerWindow: NSWindow {
             spinner.style = .spinning
             spinner.controlSize = .small
             spinner.startAnimation(nil)
-            let label = coachLabel(deep ? "Rewriting more naturally (deeper check)…" : "Checking your English with Codex…",
+            let label = coachLabel(deep ? "Rewriting more naturally (deeper check)…" : "Checking your English with \(CoachProvider.current.name)…",
                                    size: 12, color: .secondaryLabelColor)
             let row = NSStackView(views: [spinner, label])
             row.spacing = 8
@@ -1050,7 +1050,7 @@ final class ComposerWindow: NSWindow {
         case .result(let r, let draft):
             rows += coachRows(r, draft: draft, width: width)
             if !r.isTranslation && !r.isClean { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
-            let deeper = r.model == EnglishCoach.deepModel ? "" : "   ⌘K deeper"
+            let deeper = EnglishCoach.isDeep(r.model) ? "" : "   ⌘K deeper"
             hint = r.isClean ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
                 : r.isTranslation ? "↵ send English   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
                 : "↵ send corrected   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
@@ -1092,7 +1092,7 @@ final class ComposerWindow: NSWindow {
         // Neutral: green/yellow/red are reserved for the changes themselves.
         header.append(NSAttributedString(string: scoreText, attributes: [
             .font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: NSColor.labelColor]))
-        if r.model == EnglishCoach.deepModel {
+        if EnglishCoach.isDeep(r.model) {
             header.append(NSAttributedString(string: "  · deeper check", attributes: [
                 .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
         }

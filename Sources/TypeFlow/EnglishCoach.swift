@@ -55,32 +55,109 @@ struct CoachResult: Codable, Equatable {
 
 enum CoachError: LocalizedError {
     case codexNotFound
+    case claudeNotFound
     case failed(String)
     case badOutput
 
     var errorDescription: String? {
         switch self {
         case .codexNotFound: return "Codex CLI not found — install it with `brew install --cask codex`."
+        case .claudeNotFound: return "Claude Code CLI not found — install it from claude.com/claude-code."
         case .failed(let msg): return msg
-        case .badOutput: return "Codex returned an unreadable answer — try again."
+        case .badOutput: return "The coach returned an unreadable answer — try again."
         }
     }
 }
 
-/// On-demand English coaching via the Codex CLI (ChatGPT plan, no API key).
+/// Who runs the ⌘K check, picked from the menu bar. Codex (ChatGPT plan) is the
+/// default — Luna measured best (docs/coach-benchmark.md). A Claude account is
+/// the fallback for when the ChatGPT allowance runs low.
+enum CoachProvider: Equatable {
+    case codex
+    /// `account` names a `~/.claude-<account>` config dir (one per Claude login).
+    case claude(account: String)
+
+    private static let defaultsKey = "coachProvider"
+
+    static var current: CoachProvider {
+        get {
+            let raw = UserDefaults.standard.string(forKey: defaultsKey) ?? ""
+            guard raw.hasPrefix("claude:") else { return .codex }
+            return .claude(account: String(raw.dropFirst("claude:".count)))
+        }
+        set {
+            switch newValue {
+            case .codex: UserDefaults.standard.removeObject(forKey: defaultsKey)
+            case .claude(let account): UserDefaults.standard.set("claude:" + account, forKey: defaultsKey)
+            }
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .codex: return "Codex · Luna"
+        case .claude(let account): return "Claude · \(account)"
+        }
+    }
+
+    /// Default check, and the deeper one (⌘K again).
+    var quickModel: String {
+        switch self {
+        case .codex: return "gpt-6-luna"
+        case .claude: return "claude-haiku-5-5"
+        }
+    }
+
+    var deepModel: String {
+        switch self {
+        case .codex: return "gpt-6-sol"
+        case .claude: return "claude-sonnet-5-5"
+        }
+    }
+
+    /// Signed-in Claude accounts: every `~/.claude-<name>` whose `.claude.json`
+    /// holds an OAuth login. Skips dirs that point Claude Code at another
+    /// backend with a key (e.g. ~/.claude-glm) — those have no `oauthAccount`.
+    static func claudeAccounts() -> [String] {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let prefix = ".claude-"
+        let dirs = (try? fm.contentsOfDirectory(atPath: home.path)) ?? []
+        return dirs.filter { $0.hasPrefix(prefix) }.sorted().compactMap { dir in
+            let json = home.appendingPathComponent(dir).appendingPathComponent(".claude.json")
+            guard let data = try? Data(contentsOf: json),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["oauthAccount"] is [String: Any]
+            else { return nil }
+            return String(dir.dropFirst(prefix.count))
+        }
+    }
+}
+
+/// On-demand English coaching via the Codex CLI (ChatGPT plan) or the Claude Code
+/// CLI (Claude subscription) — no API keys. See `CoachProvider`.
 ///
 /// Only runs when the user asks (⌘K) — never per keystroke. Each call is a fresh,
 /// ephemeral `codex exec` stripped down to the bare minimum (measured ~4.8k tokens
 /// vs ~18k for a default call): no user config/plugins/MCP, no web search, every
 /// optional feature disabled, and the coaching rules replace Codex's own
-/// coding-agent instructions. Output is constrained to a JSON schema so the panel
-/// can render each field.
+/// coding-agent instructions. The Claude path is the same idea with `claude -p`:
+/// no tools, MCP, hooks, skills, or saved session. Output is constrained to a
+/// JSON schema so the panel can render each field.
 @MainActor
 final class EnglishCoach {
     /// Default: cheap and fast. Deep (⌘K again): noticeably more natural rewrites,
-    /// at a higher cost per check against the ChatGPT plan allowance.
-    nonisolated static let quickModel = "gpt-6-luna"
-    nonisolated static let deepModel = "gpt-6-sol"
+    /// at a higher cost per check against the plan allowance.
+    nonisolated static func isDeep(_ model: String) -> Bool {
+        model == CoachProvider.codex.deepModel || model == CoachProvider.claude(account: "").deepModel
+    }
     nonisolated private static let timeout: TimeInterval = 60
     /// The writing categories of wingman-english's closed taxonomy
     /// (knowledge/transfer/taxonomy.md — the two phonology ones don't apply to
@@ -102,10 +179,30 @@ final class EnglishCoach {
 
     /// Run one check. Throws `CancellationError` if `cancel()` was called meanwhile.
     func check(_ text: String, deep: Bool = false) async throws -> CoachResult {
-        let model = deep ? Self.deepModel : Self.quickModel
         cancel()
-        guard let codex = Self.codexURL() else { throw CoachError.codexNotFound }
+        let provider = CoachProvider.current
+        let model = deep ? provider.deepModel : provider.quickModel
         let dir = try Self.workDir()
+        let data: Data
+        switch provider {
+        case .codex:
+            data = try await checkWithCodex(text, model: model, dir: dir)
+        case .claude(let account):
+            // Haiku at medium for the quick check (the owner's pick); Sonnet at
+            // low for the deeper one — the only effort the benchmark measured.
+            data = try await checkWithClaude(text, model: model, effort: deep ? "low" : "medium",
+                                             account: account, dir: dir)
+        }
+        guard let result = try? JSONDecoder().decode(CoachResult.self, from: data) else {
+            throw CoachError.badOutput
+        }
+        var cleaned = Self.cleaned(result)
+        cleaned.model = model
+        return cleaned
+    }
+
+    private func checkWithCodex(_ text: String, model: String, dir: URL) async throws -> Data {
+        guard let codex = Self.codexURL() else { throw CoachError.codexNotFound }
         if disableArgs == nil { disableArgs = await Self.featureDisableArgs(codex: codex) }
 
         let out = dir.appendingPathComponent("last-\(UUID().uuidString).json")
@@ -126,18 +223,54 @@ final class EnglishCoach {
         // with "-" can't be parsed as a flag.
 
         let started = Date()
-        let (status, stderrText) = try await run(codex, args: args, stdin: text, cwd: dir)
+        let r = try await run(codex, name: "Codex", args: args, stdin: text, cwd: dir)
         try Task.checkCancellation()
-        if Self.debug {
-            fputs("TypeFlow: coach exit=\(status) in \(String(format: "%.1f", Date().timeIntervalSince(started)))s\n", stderr)
+        Self.logTiming(r.status, since: started)
+        guard r.status == 0 else { throw CoachError.failed(Self.summarize(r.stderr)) }
+        guard let data = try? Data(contentsOf: out) else { throw CoachError.badOutput }
+        return data
+    }
+
+    /// `account` picks the login via CLAUDE_CONFIG_DIR, the same way the
+    /// `claude-<account>` shell aliases do. Hooks are off so wingman-english's
+    /// capture hook never logs the draft as if it were a prompt.
+    private func checkWithClaude(_ text: String, model: String, effort: String,
+                                 account: String, dir: URL) async throws -> Data {
+        guard let claude = Self.claudeURL() else { throw CoachError.claudeNotFound }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let args = [
+            "-p", "--model", model, "--effort", effort,
+            "--system-prompt-file", dir.appendingPathComponent("coach.md").path,
+            "--json-schema", Self.schema,
+            "--tools", "", "--strict-mcp-config",
+            "--settings", #"{"disableAllHooks":true}"#,
+            "--disable-slash-commands", "--no-session-persistence",
+            "--output-format", "json",
+        ]
+        let env = ["CLAUDE_CONFIG_DIR": home.appendingPathComponent(".claude-\(account)").path]
+
+        let started = Date()
+        let r = try await run(claude, name: "Claude", args: args, stdin: text, cwd: dir,
+                              env: env, unset: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"])
+        try Task.checkCancellation()
+        Self.logTiming(r.status, since: started)
+        // `--output-format json` reports errors (signed out, usage limit) on
+        // stdout as `is_error` + `result`, often with a non-zero exit.
+        let obj = (try? JSONSerialization.jsonObject(with: Data(r.stdout.utf8))) as? [String: Any]
+        if obj?["is_error"] as? Bool == true || r.status != 0 {
+            let msg = (obj?["result"] as? String).map { String($0.prefix(200)) }
+            throw CoachError.failed(msg.map { "Claude (\(account)): \($0)" }
+                ?? "Claude failed — run `claude-\(account)` in a terminal and /login if you're signed out.")
         }
-        guard status == 0 else { throw CoachError.failed(Self.summarize(stderrText)) }
-        guard let data = try? Data(contentsOf: out),
-              let result = try? JSONDecoder().decode(CoachResult.self, from: data)
+        guard let structured = obj?["structured_output"],
+              let data = try? JSONSerialization.data(withJSONObject: structured)
         else { throw CoachError.badOutput }
-        var cleaned = Self.cleaned(result)
-        cleaned.model = model
-        return cleaned
+        return data
+    }
+
+    private static func logTiming(_ status: Int32, since started: Date) {
+        guard debug else { return }
+        fputs("TypeFlow: coach exit=\(status) in \(String(format: "%.1f", Date().timeIntervalSince(started)))s\n", stderr)
     }
 
     func cancel() {
@@ -147,19 +280,23 @@ final class EnglishCoach {
 
     // MARK: - Process
 
-    private func run(_ exe: URL, args: [String], stdin: String, cwd: URL) async throws -> (Int32, String) {
+    private func run(_ exe: URL, name: String, args: [String], stdin: String, cwd: URL,
+                     env extra: [String: String] = [:], unset: [String] = []
+    ) async throws -> (status: Int32, stdout: String, stderr: String) {
         let p = Process()
         p.executableURL = exe
         p.arguments = args
         p.currentDirectoryURL = cwd
-        // GUI apps get a minimal PATH; give Codex the usual Homebrew locations.
+        // GUI apps get a minimal PATH; give the CLI the usual Homebrew locations.
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        for key in unset { env[key] = nil }
+        env.merge(extra) { _, new in new }
         p.environment = env
 
-        let input = Pipe(), errPipe = Pipe()
+        let input = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = input
-        p.standardOutput = FileHandle.nullDevice
+        p.standardOutput = outPipe
         p.standardError = errPipe
         process = p
 
@@ -172,8 +309,8 @@ final class EnglishCoach {
         defer { timer.cancel() }
 
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Int32, String), Error>) in
-                // Drain stderr off the main thread so a chatty Codex can't fill the
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(status: Int32, stdout: String, stderr: String), Error>) in
+                // Drain both pipes off the main thread so a chatty CLI can't fill a
                 // pipe buffer and block.
                 let drained = DispatchGroup()
                 drained.enter()
@@ -181,26 +318,32 @@ final class EnglishCoach {
                     state.errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                     drained.leave()
                 }
+                drained.enter()
+                DispatchQueue.global().async {
+                    state.outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    drained.leave()
+                }
                 p.terminationHandler = { proc in
                     drained.wait()
-                    let errText = String(decoding: state.errData, as: UTF8.self)
                     if proc.terminationReason == .uncaughtSignal {
                         // Killed by us: either the timeout, or a newer check / cancel().
                         cont.resume(throwing: state.timedOut
-                                    ? CoachError.failed("Codex took longer than \(Int(Self.timeout))s — try again.")
+                                    ? CoachError.failed("\(name) took longer than \(Int(Self.timeout))s — try again.")
                                     : CancellationError())
                     } else {
-                        cont.resume(returning: (proc.terminationStatus, errText))
+                        cont.resume(returning: (proc.terminationStatus,
+                                                String(decoding: state.outData, as: UTF8.self),
+                                                String(decoding: state.errData, as: UTF8.self)))
                     }
                 }
                 do {
                     try p.run()
-                    // Close stdin after writing, or Codex waits for more input forever.
+                    // Close stdin after writing, or the CLI waits for more input forever.
                     input.fileHandleForWriting.write(Data(stdin.utf8))
                     try? input.fileHandleForWriting.close()
                 } catch {
                     p.terminationHandler = nil
-                    cont.resume(throwing: CoachError.failed("Couldn't start Codex: \(error.localizedDescription)"))
+                    cont.resume(throwing: CoachError.failed("Couldn't start \(name): \(error.localizedDescription)"))
                 }
             }
         } onCancel: { [weak p] in
@@ -208,10 +351,11 @@ final class EnglishCoach {
         }
     }
 
-    /// Shared between the timeout timer, the stderr reader, and the termination
+    /// Shared between the timeout timer, the pipe readers, and the termination
     /// handler — each runs on its own queue, and each field has a single writer.
     private final class RunState: @unchecked Sendable {
         var timedOut = false
+        var outData = Data()
         var errData = Data()
     }
 
@@ -247,8 +391,16 @@ final class EnglishCoach {
             .map { URL(fileURLWithPath: $0) }
     }
 
+    private static func claudeURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude",
+                          "/usr/local/bin/claude", "\(home)/.npm-global/bin/claude"]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
     /// ~/Library/Application Support/TypeFlow/coach — holds the prompt + schema
-    /// files Codex reads (rewritten each launch so edits here ship with the app).
+    /// files the CLI reads (rewritten each launch so edits here ship with the app).
     private static var wroteFiles = false
     private static func workDir() throws -> URL {
         let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -266,13 +418,20 @@ final class EnglishCoach {
     /// Drop no-op fixes ("check" → "check") the model sometimes emits, and
     /// straighten its typographic quotes: the composer types straight ones (smart
     /// quotes are off so code survives), and Don't vs Don’t is not a mistake.
+    /// Haiku also double-escapes quotes in its prose fields (`\"want\"`), which
+    /// would show as literal backslashes.
     private static func cleaned(_ r: CoachResult) -> CoachResult {
         let fixes = r.fixes
             .map { CoachFix(original: $0.original, correction: straight($0.correction),
-                            reason: $0.reason, category: $0.category) }
+                            reason: unescaped($0.reason), category: $0.category) }
             .filter { !$0.original.isEmpty && straight($0.original) != $0.correction }
-        return CoachResult(intent: r.intent, score: r.score, native: straight(r.native), fixes: fixes,
-                           why: r.why, pattern: r.pattern, spanishTransfer: r.spanishTransfer)
+        return CoachResult(intent: unescaped(r.intent), score: r.score, native: straight(r.native), fixes: fixes,
+                           why: unescaped(r.why), pattern: unescaped(r.pattern),
+                           spanishTransfer: unescaped(r.spanishTransfer))
+    }
+
+    private static func unescaped(_ s: String) -> String {
+        straight(s).replacingOccurrences(of: "\\\"", with: "\"")
     }
 
     /// ’ ‘ → '  and  “ ” → "  — one character for one, so string ranges survive.
