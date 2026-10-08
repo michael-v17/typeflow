@@ -69,7 +69,7 @@ enum CoachError: LocalizedError {
     }
 }
 
-/// Who runs the ⌘K check, picked from the menu bar. Codex (ChatGPT plan) is the
+/// Who runs the ⌘K check, picked in the composer footer. Codex (ChatGPT plan) is the
 /// default — Luna measured best (docs/coach-benchmark.md). A Claude account is
 /// the fallback for when the ChatGPT allowance runs low.
 enum CoachProvider: Equatable {
@@ -78,6 +78,24 @@ enum CoachProvider: Equatable {
     case claude(account: String)
 
     private static let defaultsKey = "coachProvider"
+    private static let claudeModelKey = "coachClaudeModel"
+
+    /// The Claude model for the quick check. ⌘K again always uses Sonnet.
+    enum ClaudeModel: String, CaseIterable {
+        case haiku = "claude-haiku-5-5"
+        case sonnet = "claude-sonnet-5-5"
+
+        /// Haiku at medium is the owner's pick; low is the only Sonnet effort the
+        /// benchmark measured.
+        var effort: String { self == .haiku ? "medium" : "low" }
+        var label: String { self == .haiku ? "Haiku 5.5 · medium" : "Sonnet 5.5 · low" }
+        var shortName: String { self == .haiku ? "Haiku" : "Sonnet" }
+    }
+
+    static var claudeModel: ClaudeModel {
+        get { UserDefaults.standard.string(forKey: claudeModelKey).flatMap(ClaudeModel.init) ?? .haiku }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: claudeModelKey) }
+    }
 
     static var current: CoachProvider {
         get {
@@ -100,10 +118,22 @@ enum CoachProvider: Equatable {
         }
     }
 
-    var label: String {
+    /// Footer title: what the next ⌘K will use.
+    var shortLabel: String {
         switch self {
-        case .codex: return "Codex · Luna"
-        case .claude(let account): return "Claude · \(account)"
+        case .codex: return "Luna"
+        case .claude(let account): return "\(Self.claudeModel.shortName) · \(account)"
+        }
+    }
+
+    /// Result header: which model answered.
+    static func displayName(model: String) -> String {
+        switch model {
+        case "gpt-6-luna": return "Luna"
+        case "gpt-6-sol": return "Sol"
+        case ClaudeModel.haiku.rawValue: return "Haiku 5.5"
+        case ClaudeModel.sonnet.rawValue: return "Sonnet 5.5"
+        default: return model
         }
     }
 
@@ -111,14 +141,14 @@ enum CoachProvider: Equatable {
     var quickModel: String {
         switch self {
         case .codex: return "gpt-6-luna"
-        case .claude: return "claude-haiku-5-5"
+        case .claude: return Self.claudeModel.rawValue
         }
     }
 
     var deepModel: String {
         switch self {
         case .codex: return "gpt-6-sol"
-        case .claude: return "claude-sonnet-5-5"
+        case .claude: return ClaudeModel.sonnet.rawValue
         }
     }
 
@@ -188,9 +218,8 @@ final class EnglishCoach {
         case .codex:
             data = try await checkWithCodex(text, model: model, dir: dir)
         case .claude(let account):
-            // Haiku at medium for the quick check (the owner's pick); Sonnet at
-            // low for the deeper one — the only effort the benchmark measured.
-            data = try await checkWithClaude(text, model: model, effort: deep ? "low" : "medium",
+            let effort = CoachProvider.ClaudeModel(rawValue: model)?.effort ?? "low"
+            data = try await checkWithClaude(text, model: model, effort: effort,
                                              account: account, dir: dir)
         }
         guard let result = try? JSONDecoder().decode(CoachResult.self, from: data) else {

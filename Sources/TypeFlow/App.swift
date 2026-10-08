@@ -11,7 +11,7 @@ enum TypeFlowMain {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     var composer: ComposerWindow!
     var watcher: ProcessWatcher!
     var hotKey: HotKey!
@@ -110,39 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "Open Composer  ⌥Space",
                      action: #selector(toggleComposer),
                      keyEquivalent: "").target = self
-        let coachItem = menu.addItem(withTitle: "⌘K Coach", action: nil, keyEquivalent: "")
-        let coachMenu = NSMenu(title: "⌘K Coach")
-        coachMenu.delegate = self // rebuilt on open: accounts can change
-        coachItem.submenu = coachMenu
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit TypeFlow",
                      action: #selector(NSApp.terminate(_:)),
                      keyEquivalent: "q")
         statusItem.menu = menu
-    }
-
-    /// ⌘K Coach submenu: Codex, then one row per signed-in Claude account.
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let current = CoachProvider.current
-        var providers: [CoachProvider] = [.codex] + CoachProvider.claudeAccounts().map { .claude(account: $0) }
-        if !providers.contains(current) { providers.append(current) } // saved account since removed
-        for provider in providers {
-            let title: String
-            switch provider {
-            case .codex: title = "Codex · Luna (best)"
-            case .claude: title = provider.label + " · Haiku"
-            }
-            let item = menu.addItem(withTitle: title, action: #selector(pickCoach(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = provider
-            item.state = provider == current ? .on : .off
-        }
-    }
-
-    @objc private func pickCoach(_ sender: NSMenuItem) {
-        guard let provider = sender.representedObject as? CoachProvider else { return }
-        CoachProvider.current = provider
     }
 
     @objc func toggleComposer() {

@@ -1,6 +1,6 @@
 import AppKit
 
-final class ComposerWindow: NSWindow {
+final class ComposerWindow: NSWindow, NSMenuDelegate {
     let textView = GhostTextView()
     private let wordCompleter = WordCompleter()
     private let ghostCompleter = GhostCompleter()
@@ -35,6 +35,8 @@ final class ComposerWindow: NSWindow {
     private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
+    /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
+    private let coachPicker = NSPopUpButton(frame: .zero, pullsDown: true)
     private let dictateButton = NSButton()
     /// Returns true if the send succeeded; on false the composer keeps its text.
     private var onSubmit: ((ComposerSend) -> Bool)?
@@ -264,6 +266,15 @@ final class ComposerWindow: NSWindow {
         keepOpenCheckbox.state = keepOpen ? .on : .off
         keepOpenCheckbox.toolTip = "Sending (↵) or copying (⌘⇧C) clears the draft without closing the composer"
 
+        coachPicker.translatesAutoresizingMaskIntoConstraints = false
+        coachPicker.isBordered = false
+        coachPicker.controlSize = .small
+        coachPicker.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        coachPicker.contentTintColor = .secondaryLabelColor
+        coachPicker.toolTip = "⌘K coach — switch to Claude when the Codex budget runs low"
+        coachPicker.menu?.delegate = self // rebuilt on open: Claude logins can change
+        refreshCoachPicker()
+
         dictateButton.translatesAutoresizingMaskIntoConstraints = false
         dictateButton.isBordered = false
         dictateButton.bezelStyle = .accessoryBarAction
@@ -315,6 +326,7 @@ final class ComposerWindow: NSWindow {
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
         footer.addSubview(dictateButton)
+        footer.addSubview(coachPicker)
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -381,7 +393,9 @@ final class ComposerWindow: NSWindow {
 
             sessionLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
             sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: dictateButton.leadingAnchor, constant: -8),
+            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: coachPicker.leadingAnchor, constant: -8),
+            coachPicker.trailingAnchor.constraint(equalTo: dictateButton.leadingAnchor, constant: -10),
+            coachPicker.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
             keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
@@ -1092,8 +1106,10 @@ final class ComposerWindow: NSWindow {
         // Neutral: green/yellow/red are reserved for the changes themselves.
         header.append(NSAttributedString(string: scoreText, attributes: [
             .font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: NSColor.labelColor]))
-        if EnglishCoach.isDeep(r.model) {
-            header.append(NSAttributedString(string: "  · deeper check", attributes: [
+        let modelName = CoachProvider.displayName(model: r.model)
+        if !modelName.isEmpty {
+            let deeper = EnglishCoach.isDeep(r.model) ? ", deeper check" : ""
+            header.append(NSAttributedString(string: "  · \(modelName)\(deeper)", attributes: [
                 .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
         }
         if !r.intent.isEmpty {
@@ -1336,6 +1352,64 @@ final class ComposerWindow: NSWindow {
         } else {
             hide()
         }
+    }
+
+    // MARK: - Coach picker
+
+    /// A pull-down's first item is its title; the rest is the menu.
+    private func refreshCoachPicker() {
+        let menu = coachPicker.menu!
+        menu.removeAllItems()
+        let current = CoachProvider.current
+        menu.addItem(withTitle: "⌘K: " + current.shortLabel, action: nil, keyEquivalent: "")
+
+        func add(_ title: String, on: Bool, action: Selector, _ value: Any?, indent: Bool = true) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = value
+            item.state = on ? .on : .off
+            if indent { item.indentationLevel = 1 }
+        }
+        add("Codex · Luna (best)", on: current == .codex, action: #selector(pickCoachProvider(_:)),
+            CoachProvider.codex, indent: false)
+
+        var accounts = CoachProvider.claudeAccounts()
+        if case .claude(let a) = current, !accounts.contains(a) { accounts.append(a) } // since removed
+        guard !accounts.isEmpty else { return }
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "Claude account"))
+        for a in accounts {
+            add(a, on: current == .claude(account: a), action: #selector(pickCoachProvider(_:)),
+                CoachProvider.claude(account: a))
+        }
+        menu.addItem(.sectionHeader(title: "Claude model (⌘K again: Sonnet)"))
+        for m in CoachProvider.ClaudeModel.allCases {
+            add(m.label, on: current != .codex && CoachProvider.claudeModel == m,
+                action: #selector(pickClaudeModel(_:)), m.rawValue)
+        }
+    }
+
+    @objc private func pickCoachProvider(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? CoachProvider else { return }
+        CoachProvider.current = provider
+        refreshCoachPicker()
+        makeFirstResponder(textView)
+    }
+
+    /// Picking a model while on Codex switches to Claude (first account).
+    @objc private func pickClaudeModel(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let model = CoachProvider.ClaudeModel(rawValue: raw) else { return }
+        CoachProvider.claudeModel = model
+        if CoachProvider.current == .codex, let first = CoachProvider.claudeAccounts().first {
+            CoachProvider.current = .claude(account: first)
+        }
+        refreshCoachPicker()
+        makeFirstResponder(textView)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === coachPicker.menu { refreshCoachPicker() }
     }
 
     @objc private func keepOpenToggled(_ sender: NSButton) {
