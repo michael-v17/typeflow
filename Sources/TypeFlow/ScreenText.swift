@@ -1,9 +1,9 @@
 import AppKit
 import Vision
 
-/// Reads the text in a screenshot on-device (Apple Vision), so a pasted image can
-/// be the message a reply answers. Every coach then gets plain text; the image is
-/// never saved, sent, or logged.
+/// A pasted screenshot as the message a reply answers: Apple Vision reads its text
+/// on-device for the context box, and the image itself goes to the coach (a
+/// diagram needs the picture). Never saved beyond the check or logged.
 enum ScreenText {
     /// An image on the clipboard: a screenshot (⌃⌘⇧4) or a copied image file.
     static func clipboardImage(_ pb: NSPasteboard = .general) -> CGImage? {
@@ -60,6 +60,26 @@ enum ScreenText {
                 .compactMap { $0.topCandidates(1).first?.string }
             return lines.joined(separator: "\n")
         }.value
+    }
+
+    /// PNG for the coach, longest side capped at 2000 px: models downscale past
+    /// that anyway, and Claude refuses images over 5 MB. Never written anywhere
+    /// but the coach's temp file, deleted after the check.
+    static func uploadPNG(_ image: CGImage) -> Data? {
+        let longest = max(image.width, image.height)
+        var out = image
+        if longest > 2000 {
+            let k = 2000.0 / Double(longest)
+            let w = Int(Double(image.width) * k), h = Int(Double(image.height) * k)
+            if let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: CGColorSpaceCreateDeviceRGB(),
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                ctx.interpolationQuality = .high
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                out = ctx.makeImage() ?? image
+            }
+        }
+        return NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:])
     }
 
     /// A 1x-display capture (e.g. the 3440×1440 external monitor) has terminal

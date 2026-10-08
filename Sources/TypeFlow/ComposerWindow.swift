@@ -43,8 +43,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// draft; cleared on send. Never logged.
     private struct ReplyContext {
         enum Source: String { case text = "pasted text", screenshot }
+        /// For a screenshot: what Vision read, shown in the box (may be empty).
         let text: String
         let source: Source
+        /// A screenshot goes to the coach as an image too (PNG), so a diagram or a
+        /// UI is understood, not just its words.
+        var image: Data? = nil
     }
     private var contexts: [pid_t: ReplyContext] = [:]
     /// The visible session's context (mirrors contexts[currentPID], like liveDictated).
@@ -545,8 +549,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         makeFirstResponder(textView)
     }
 
-    /// OCR runs off the main thread (~0.5 s); the result lands only if the user
-    /// is still on the same session.
+    /// OCR runs off the main thread (~0.5 s) to fill the box; the image itself
+    /// goes to the coach too. The result lands only if the user is still on the
+    /// same session.
     private func readScreenshot(_ image: CGImage) {
         let pid = currentPID
         hintLabel.stringValue = "Reading the screenshot…"
@@ -554,15 +559,13 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         Task { [weak self] in
             let text = (try? await ScreenText.recognize(image))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let png = ScreenText.uploadPNG(image)
             guard let self, self.currentPID == pid else { return }
             self.hintLabel.textColor = .tertiaryLabelColor
             self.hintLabel.stringValue = Self.defaultHint
-            guard !text.isEmpty else {
-                NSSound.beep()
-                self.flashHint("No text found in that screenshot", color: .secondaryLabelColor)
-                return
-            }
-            self.setContext(ReplyContext(text: text, source: .screenshot))
+            guard png != nil || !text.isEmpty else { NSSound.beep(); return }
+            // No text is fine (a diagram, a photo): the coach still sees the image.
+            self.setContext(ReplyContext(text: text, source: .screenshot, image: png))
             self.makeFirstResponder(self.textView)
         }
     }
@@ -584,8 +587,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         var h: CGFloat = 0
         if let ctx = liveContext {
             let cut = ctx.text.count > EnglishCoach.contextLimit ? " · last \(EnglishCoach.contextLimit / 1000)k characters" : ""
-            contextTitle.stringValue = "REPLYING TO · \(ctx.source.rawValue)\(cut)"
-            contextText.string = ctx.text
+            let sent = ctx.image != nil ? " · the coach sees the image" : ""
+            contextTitle.stringValue = "REPLYING TO · \(ctx.source.rawValue)\(sent)\(cut)"
+            contextText.string = ctx.text.isEmpty ? "(No text found. The coach will read the image.)" : ctx.text
             // Measure at the width the text will have once the box is laid out.
             let width = max(100, frame.width - 40 - 16)
             contextText.frame.size.width = width
@@ -1220,7 +1224,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             guard !EnglishCoach.isDeep(r.model) else { NSSound.beep(); return } // already deep
             deep = true
         }
-        let context = liveContext?.text
+        let context = liveContext.map { EnglishCoach.Context(text: $0.text, image: $0.image) }
         textView.suggestion = nil
         ghostCompleter.cancel()
         clearGrammar() // the coach covers grammar too; one panel at a time
