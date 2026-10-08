@@ -271,7 +271,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         coachPicker.controlSize = .small
         coachPicker.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         coachPicker.contentTintColor = .secondaryLabelColor
-        coachPicker.toolTip = "⌘K coach — switch to Claude when the Codex budget runs low"
+        coachPicker.toolTip = "Model for ⌘K checks"
         coachPicker.menu?.delegate = self // rebuilt on open: Claude logins can change
         refreshCoachPicker()
 
