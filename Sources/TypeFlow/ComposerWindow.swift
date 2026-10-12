@@ -33,10 +33,16 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private static let defaultHint = "↵ send   ⌘K check English   ⇧↵ newline   ⎋ close"
     /// The resting hint: with a message to answer, ⌘K suggests a reply instead.
     private var idleHint: String {
-        liveContext == nil ? Self.defaultHint : "↵ send   ⌘K suggest reply   ⇧↵ newline   ⎋ close"
+        "↵ \(enterVerb)   ⌘K \(liveContext == nil ? "check English" : "suggest reply")   ⇧↵ newline   ⎋ close"
     }
+    /// What Enter does right now: send into Warp, or copy (terminal mode off).
+    private var enterVerb: String { terminalMode ? "send" : "copy" }
+    /// The "⌘⇧C copy" hint — redundant when Enter already copies.
+    private var copyHint: String { terminalMode ? "   ⌘⇧C copy" : "" }
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
+    /// Footer pill: where Enter goes — Warp (terminal mode) or the clipboard. ⌘T.
+    private let modeButton = NSButton()
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
     /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
@@ -83,6 +89,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // explicitly turned it off (object == nil means they never touched it).
         get { (UserDefaults.standard.object(forKey: Self.keepOpenKey) as? Bool) ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.keepOpenKey) }
+    }
+
+    private static let terminalModeKey = "TypeFlowTerminalMode"
+    /// On: Enter sends into Warp's frontmost tab. Off: the composer is just a
+    /// correction box — Enter copies (like ⌘⇧C) and nothing ever touches Warp,
+    /// for writing a chat message elsewhere. Persisted; default on.
+    private var terminalMode: Bool {
+        get { (UserDefaults.standard.object(forKey: Self.terminalModeKey) as? Bool) ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.terminalModeKey) }
     }
 
     // Per-session state: a separate draft per Claude session, and live following
@@ -282,6 +297,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         sessionLabel.lineBreakMode = .byTruncatingTail
         sessionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        modeButton.translatesAutoresizingMaskIntoConstraints = false
+        modeButton.isBordered = false
+        modeButton.bezelStyle = .accessoryBarAction
+        modeButton.controlSize = .small
+        modeButton.imagePosition = .imageLeading
+        modeButton.target = self
+        modeButton.action = #selector(toggleTerminalMode)
+        modeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
@@ -350,6 +374,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             coachStack.bottomAnchor.constraint(equalTo: coachDoc.bottomAnchor),
         ])
 
+        footer.addSubview(modeButton)
         footer.addSubview(sessionLabel)
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
@@ -451,7 +476,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             footer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
             footer.heightAnchor.constraint(equalToConstant: 18),
 
-            sessionLabel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            modeButton.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            modeButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sessionLabel.leadingAnchor.constraint(equalTo: modeButton.trailingAnchor, constant: 6),
             sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: dictateButton.leadingAnchor, constant: -8),
             keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
@@ -635,10 +662,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         makeFirstResponder(textView)
         onShow?() // boost the session poll while we're open
         refreshCoachPicker()
-        // Follow the focused Warp tab live while the composer is open.
-        lastWarpTitle = nil   // force the first poll to follow
-        followTick()
-        startFollowTimer()
+        refreshTerminalMode()
     }
 
     func hide() {
@@ -1303,17 +1327,17 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             let row = NSStackView(views: [spinner, label])
             row.spacing = 8
             rows.append(row)
-            hint = "⌥↵ send without waiting   ⎋ cancel"
+            hint = "⌥↵ \(enterVerb) without waiting   ⎋ cancel"
         case .failed(let message):
             rows.append(coachLabel("Couldn't check: \(message)", size: 12, color: .systemRed, width: width))
-            hint = "↵ send   ⌘⇧C copy   ⌘K retry   ⎋ close panel"
+            hint = "↵ \(enterVerb)\(copyHint)   ⌘K retry   ⎋ close panel"
         case .result(let r, let draft):
             rows += coachRows(r, draft: draft, width: width)
             if !r.isTranslation && !r.isClean(for: draft) { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
             let deeper = EnglishCoach.isDeep(r.model) ? "" : "   ⌘K deeper"
             let sendWhat = r.isReply ? "reply" : r.isTranslation ? "English" : "corrected"
-            hint = r.isClean(for: draft) ? "↵ send   ⌘⇧C copy   ⎋ back to edit"
-                : "↵ send \(sendWhat)   ⌥↵ mine   ⌘⇧C copy\(deeper)   ⎋ edit"
+            hint = r.isClean(for: draft) ? "↵ \(enterVerb)\(copyHint)   ⎋ back to edit"
+                : "↵ \(enterVerb) \(sendWhat)   ⌥↵ mine\(copyHint)\(deeper)   ⎋ edit"
         }
 
         textView.setCoachRemovals(removals) // cleared whenever there's no result
@@ -1504,6 +1528,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             startCoach()
             return true
         }
+        if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "t" {
+            toggleTerminalMode()
+            return true
+        }
         if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "c" {
             copyForElsewhere()
             return true
@@ -1566,6 +1594,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         default:
             (raw, coach, corrected) = (textView.string, currentCoachResult, false)
         }
+        copy(raw, coach: coach, corrected: corrected)
+    }
+
+    /// The copy itself — ⌘⇧C, and Enter / ⌥↵ when terminal mode is off. Logged
+    /// to wingman-english as `destination: "clipboard"` when ⌘K checked it.
+    private func copy(_ raw: String, coach: CoachResult?, corrected: Bool) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { NSSound.beep(); return }
         let pb = NSPasteboard.general
@@ -1604,6 +1638,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     private func send(_ raw: String, coach: CoachResult?, corrected: Bool) {
+        guard terminalMode else { return copy(raw, coach: coach, corrected: corrected) }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             NSSound.beep()
@@ -1676,6 +1711,38 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === coachPicker.menu { refreshCoachPicker() }
+    }
+
+    /// ⌘T / the footer pill: switch Enter between Warp and the clipboard.
+    @objc private func toggleTerminalMode() {
+        terminalMode.toggle()
+        refreshTerminalMode()
+        makeFirstResponder(textView)
+    }
+
+    /// Sync the pill, session label, hints and Warp tab-following with the mode.
+    /// Copy mode hides the session — nothing is going to Warp — and stops the
+    /// follow poll, which only exists to name where a send lands.
+    private func refreshTerminalMode() {
+        let on = terminalMode
+        modeButton.image = NSImage(systemSymbolName: on ? "terminal" : "doc.on.clipboard",
+                                   accessibilityDescription: nil)
+        let color: NSColor = on ? .secondaryLabelColor : .controlAccentColor
+        modeButton.attributedTitle = NSAttributedString(string: on ? "Warp" : "Copy", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: on ? .regular : .semibold), .foregroundColor: color])
+        modeButton.contentTintColor = color
+        modeButton.toolTip = on
+            ? "Terminal mode: ↵ sends to the Claude session in Warp's front tab. ⌘T → copy mode"
+            : "Copy mode: ↵ copies the text to paste anywhere; nothing goes to Warp. ⌘T → terminal mode"
+        sessionLabel.isHidden = !on
+        if coachState == nil { hintLabel.stringValue = idleHint } else { renderCoach() }
+        if on, isVisible {
+            lastWarpTitle = nil   // force the first poll to follow
+            followTick()
+            startFollowTimer()
+        } else {
+            stopFollowTimer()
+        }
     }
 
     @objc private func keepOpenToggled(_ sender: NSButton) {
