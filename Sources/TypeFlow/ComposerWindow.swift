@@ -43,6 +43,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
     /// Footer pill: where Enter goes — Warp (terminal mode) or the clipboard. ⌘T.
     private let modeButton = NSButton()
+    /// Footer `EN` / `ES`: the draft's detected language. Click to switch and lock it.
+    private let langButton = NSButton()
+    private var draftLanguage: DraftLanguage = .english
+    /// Set by a click on `langButton`: detection stops until the draft is sent,
+    /// copied or swapped for another session's.
+    private var languageLocked = false
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
     /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
@@ -306,6 +312,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         modeButton.action = #selector(toggleTerminalMode)
         modeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        langButton.translatesAutoresizingMaskIntoConstraints = false
+        langButton.isBordered = false
+        langButton.bezelStyle = .accessoryBarAction
+        langButton.controlSize = .small
+        langButton.target = self
+        langButton.action = #selector(langButtonClicked)
+        langButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        refreshLangButton()
+
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
@@ -379,6 +394,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         footer.addSubview(hintLabel)
         footer.addSubview(keepOpenCheckbox)
         footer.addSubview(dictateButton)
+        footer.addSubview(langButton)
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -480,7 +496,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             modeButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             sessionLabel.leadingAnchor.constraint(equalTo: modeButton.trailingAnchor, constant: 6),
             sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: dictateButton.leadingAnchor, constant: -8),
+            sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: langButton.leadingAnchor, constant: -8),
+            langButton.trailingAnchor.constraint(equalTo: dictateButton.leadingAnchor, constant: -8),
+            langButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
             keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
@@ -687,6 +705,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     func clear() {
         textView.string = ""
+        languageLocked = false
+        refreshDraftLanguage()
         textView.suggestion = nil
         clearGrammar() // the sent prompt's suggestions don't belong to the empty draft
         dismissCoach()
@@ -717,6 +737,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private func handleTextChange() {
         dismissCoach() // coaching describes the old text; editing returns to the draft
         if textView.string.isEmpty { flushUnsentCheck(for: currentPID ?? 0) } // draft abandoned
+        refreshDraftLanguage()
         autocorrectContraction()
         updateGhost()
         updateGrammar()
@@ -729,6 +750,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // re-populate after the (debounced) review lands.
         textView.setGrammarSpans([])
         populateGrammarPanel([])
+        guard draftLanguage == .english else { grammarReviewer.cancel(); return } // English-only reviewer
         let text = textView.string
         grammarReviewer.review(text) { [weak self] spans in
             guard let self, self.textView.string == text, self.coachState == nil else { return } // ignore stale
@@ -885,7 +907,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// a known apostrophe-less contraction, replace it with the apostrophe form
     /// (e.g. "dont " → "don't "). One edit, fully undoable; caret preserved.
     private func autocorrectContraction() {
-        guard !isCorrecting else { return }
+        guard !isCorrecting, draftLanguage == .english else { return }
         let ns = textView.string as NSString
         let sel = textView.selectedRange()
         let caret = sel.location
@@ -925,7 +947,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private func updateGhost() {
         let ns = textView.string as NSString
         let sel = textView.selectedRange()
-        guard sel.length == 0, sel.location == ns.length else {
+        // Both completers are English-only; a Spanish draft gets no ghost.
+        guard sel.length == 0, sel.location == ns.length, draftLanguage == .english else {
             textView.suggestion = nil
             ghostCompleter.cancel()
             return
@@ -1046,6 +1069,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         currentPID = pid
         textView.string = drafts[pid] ?? ""
+        languageLocked = false
+        refreshDraftLanguage()
         liveDictated = draftsDictated[pid] ?? false
         liveContext = contexts[pid]
         refreshDictateButton()
@@ -1711,6 +1736,50 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === coachPicker.menu { refreshCoachPicker() }
+    }
+
+    // MARK: - Draft language
+
+    /// Re-detect the draft's language (unless locked) and apply a change. An empty
+    /// draft starts over in English; too little text to tell keeps the current one.
+    private func refreshDraftLanguage() {
+        guard !languageLocked else { return }
+        let text = textView.string
+        let detected = text.isEmpty ? .english : (DraftLanguage.detect(text) ?? draftLanguage)
+        if detected != draftLanguage { applyDraftLanguage(detected) }
+    }
+
+    private func applyDraftLanguage(_ lang: DraftLanguage) {
+        draftLanguage = lang
+        wordCompleter.setLanguage(lang)
+        // Re-run spellcheck so the underlines match the new language.
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isContinuousSpellCheckingEnabled = true
+        if lang != .english {
+            textView.suggestion = nil
+            ghostCompleter.cancel()
+            clearGrammar()
+        }
+        refreshLangButton()
+    }
+
+    /// Click: switch to the other language and lock it for this draft.
+    @objc private func langButtonClicked() {
+        languageLocked = true
+        applyDraftLanguage(draftLanguage == .english ? .spanish : .english)
+        if draftLanguage == .english { updateGrammar() }
+        makeFirstResponder(textView)
+    }
+
+    private func refreshLangButton() {
+        let spanish = draftLanguage == .spanish
+        let color: NSColor = spanish ? .controlAccentColor : .tertiaryLabelColor
+        langButton.attributedTitle = NSAttributedString(
+            string: draftLanguage.rawValue + (languageLocked ? " 🔒" : ""),
+            attributes: [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: spanish ? .semibold : .regular),
+                         .foregroundColor: color])
+        langButton.toolTip = (languageLocked ? "Locked for this draft. " : "Detected automatically. ")
+            + "Spell check and autocorrect follow it; Spanish pauses the English-only helpers. Click to switch and lock."
     }
 
     /// ⌘T / the footer pill: switch Enter between Warp and the clipboard.
