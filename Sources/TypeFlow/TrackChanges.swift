@@ -129,21 +129,40 @@ enum TrackChanges {
         return (mine, corrected)
     }
 
-    /// Character ranges in the draft that the coach removed or replaced — marked
-    /// in the composer's own text box, so the panel doesn't repeat the draft.
-    static func removedRanges(from draft: String, to native: String) -> [(range: NSRange, slip: Bool)] {
-        // `straight` swaps one character for one, so the ranges still index the draft.
-        let a = tokenRanges(EnglishCoach.straight(draft)), b = tokens(EnglishCoach.straight(native))
-        guard !a.isEmpty, !b.isEmpty, a.count * b.count <= maxCells else { return [] }
-        let ops = diff(a.map(\.0), b)
+    /// Character ranges in `current` that the coach removed or replaced from the
+    /// checked `draft` — marked in the composer's own text box, so the panel
+    /// doesn't repeat the draft. After the draft is edited, a mark stays only on
+    /// a draft word that is still there: fix it by hand and its mark goes, and
+    /// words typed since are never marked (the coach hasn't seen them).
+    static func removedRanges(from draft: String, to native: String, in current: String)
+        -> [(range: NSRange, slip: Bool)] {
+        // `straight` swaps one character for one, so the ranges still index `current`.
+        let a = tokens(EnglishCoach.straight(draft)), b = tokens(EnglishCoach.straight(native))
+        let c = tokenRanges(EnglishCoach.straight(current))
+        guard !a.isEmpty, !b.isEmpty, !c.isEmpty, a.count * b.count <= maxCells,
+              a.count * c.count <= maxCells else { return [] }
+        // Draft token index → slip flag, for each token the coach removed.
+        let ops = diff(a, b)
         let slip = slips(ops)
-        var ranges: [(NSRange, Bool)] = []
+        var removed: [Int: Bool] = [:]
         var i = 0
         for (n, op) in ops.enumerated() {
             switch op {
             case .same: i += 1
-            case .removed: ranges.append((a[i].1, slip[n])); i += 1
+            case .removed: removed[i] = slip[n]; i += 1
             case .added: break
+            }
+        }
+        // Walk the draft → current diff: a draft token still present keeps its mark.
+        var ranges: [(NSRange, Bool)] = []
+        var d = 0, k = 0
+        for op in diff(a, c.map(\.0)) {
+            switch op {
+            case .same:
+                if let s = removed[d] { ranges.append((c[k].1, s)) }
+                d += 1; k += 1
+            case .removed: d += 1
+            case .added: k += 1
             }
         }
         return ranges

@@ -21,6 +21,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         case failed(String)
     }
     private var coachState: CoachState?
+    /// Other sessions' ⌘K results, parked while their draft is out of view (the
+    /// visible one is `coachState`). A correction stays through edits, tab
+    /// switches and hides — until the next ⌘K, a send or copy, an emptied draft or ⎋.
+    private var coachStates: [pid_t: CoachState] = [:]
     /// The latest ⌘K check per session that hasn't been sent or copied yet.
     /// Logged as unsent once its draft is abandoned; dropped on send/copy.
     private var unsentChecks: [pid_t: ComposerSend] = [:]
@@ -51,6 +55,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private var languageLocked = false
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
     private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
+    private let allDesktopsCheckbox = NSButton(checkboxWithTitle: "all desktops", target: nil, action: nil)
     /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
     private let coachPicker = NSPopUpButton(frame: .zero, pullsDown: true)
     private let dictateButton = NSButton()
@@ -95,6 +100,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // explicitly turned it off (object == nil means they never touched it).
         get { (UserDefaults.standard.object(forKey: Self.keepOpenKey) as? Bool) ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.keepOpenKey) }
+    }
+
+    private static let allDesktopsKey = "TypeFlowAllDesktops"
+    /// On: the composer is on every desktop (Space) and stays where it was put —
+    /// switching desktops leaves it in place, and ⌥Space doesn't re-center it.
+    /// Persisted; default off.
+    private var allDesktops: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.allDesktopsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.allDesktopsKey) }
     }
 
     private static let terminalModeKey = "TypeFlowTerminalMode"
@@ -169,11 +183,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private func configureWindow() {
         isMovableByWindowBackground = true
         level = .floating
-        // .moveToActiveSpace (not .canJoinAllSpaces): keep the floating level so the
-        // composer stays above other windows, but show it ONLY on the desktop the
-        // user is working on — invoking ⌥Space brings it to the current Space, and
-        // switching to another Space doesn't reveal a stray TypeFlow window there.
-        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient]
+        applyDesktopBehavior()
         hidesOnDeactivate = false
         isOpaque = false
         backgroundColor = .clear
@@ -182,6 +192,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         titlebarAppearsTransparent = true
         animationBehavior = .utilityWindow
         minSize = NSSize(width: 460, height: 160)
+    }
+
+    /// Default (.moveToActiveSpace): the composer floats above other windows but
+    /// only on the desktop in use — ⌥Space brings it to the current Space, and
+    /// another Space shows no stray TypeFlow window. "all desktops"
+    /// (.canJoinAllSpaces): it's on every Space, so switching leaves it in place.
+    private func applyDesktopBehavior() {
+        collectionBehavior = [allDesktops ? .canJoinAllSpaces : .moveToActiveSpace,
+                              .fullScreenAuxiliary, .transient]
     }
 
     private func buildContent() {
@@ -333,6 +352,15 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         keepOpenCheckbox.state = keepOpen ? .on : .off
         keepOpenCheckbox.toolTip = "Sending (↵) or copying (⌘⇧C) clears the draft without closing the composer"
 
+        allDesktopsCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        allDesktopsCheckbox.controlSize = .small
+        allDesktopsCheckbox.attributedTitle = NSAttributedString(string: "all desktops", attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        allDesktopsCheckbox.target = self
+        allDesktopsCheckbox.action = #selector(allDesktopsToggled(_:))
+        allDesktopsCheckbox.state = allDesktops ? .on : .off
+        allDesktopsCheckbox.toolTip = "Show the composer on every desktop, where you left it. Off: it opens centered on the desktop you're on"
+
         coachPicker.translatesAutoresizingMaskIntoConstraints = false
         coachPicker.isBordered = false
         coachPicker.controlSize = .small
@@ -422,6 +450,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // The coach picker shares the header row with × — the footer has no room
         // once the coach's longer hints show.
         container.addSubview(coachPicker)
+        container.addSubview(allDesktopsCheckbox)
         // Reply mode lives on the header row's left: the button that takes the
         // copied message, and under it the box showing that message.
         replyButton.translatesAutoresizingMaskIntoConstraints = false
@@ -448,9 +477,11 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             closeButton.heightAnchor.constraint(equalToConstant: 18),
             coachPicker.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             coachPicker.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
+            allDesktopsCheckbox.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            allDesktopsCheckbox.trailingAnchor.constraint(equalTo: coachPicker.leadingAnchor, constant: -12),
             replyButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             replyButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
-            replyButton.trailingAnchor.constraint(lessThanOrEqualTo: coachPicker.leadingAnchor, constant: -8),
+            replyButton.trailingAnchor.constraint(lessThanOrEqualTo: allDesktopsCheckbox.leadingAnchor, constant: -8),
             contextBox.topAnchor.constraint(equalTo: container.topAnchor, constant: 30),
             contextBox.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             contextBox.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
@@ -611,7 +642,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             let png = ScreenText.uploadPNG(image)
             guard let self, self.currentPID == pid else { return }
             self.hintLabel.textColor = .tertiaryLabelColor
-            self.hintLabel.stringValue = self.idleHint
+            self.hintLabel.stringValue = self.coachHint
             guard png != nil || !text.isEmpty else { NSSound.beep(); return }
             // No text is fine (a diagram, a photo): the coach still sees the image.
             self.setContext(ReplyContext(text: text, source: .screenshot, image: png))
@@ -674,7 +705,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     func show() {
-        center()
+        if !allDesktops { center() } // on all desktops it stays where it was put
         makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         makeFirstResponder(textView)
@@ -692,7 +723,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         textView.suggestion = nil
         ghostCompleter.cancel()
         clearGrammar()
-        dismissCoach()
+        if !showsCoachResult { dismissCoach() } // a correction waits for the composer to come back
         orderOut(nil)
         // Return focus to whatever was active before — without this, dropping
         // .nonactivatingPanel means TypeFlow stays frontmost after dismiss.
@@ -735,8 +766,17 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// Runs on every text change: first apply contraction autocorrect (on a
     /// finished word), then refresh the word-completion ghost.
     private func handleTextChange() {
-        dismissCoach() // coaching describes the old text; editing returns to the draft
-        if textView.string.isEmpty { flushUnsentCheck(for: currentPID ?? 0) } // draft abandoned
+        if textView.string.isEmpty { // draft abandoned, and its correction with it
+            flushUnsentCheck(for: currentPID ?? 0)
+            dismissCoach()
+        } else if case .failed = coachState {
+            dismissCoach()
+        } else if coachState != nil {
+            // A correction stays up while the draft is edited — fixing the marked
+            // words by hand is the point. Only its marks and Enter's meaning move.
+            refreshCoachMarks()
+            hintLabel.stringValue = coachHint
+        }
         refreshDraftLanguage()
         autocorrectContraction()
         updateGhost()
@@ -1000,6 +1040,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         tabNames = tabNames.filter { alive.contains($0.key) }
         draftsDictated = draftsDictated.filter { alive.contains($0.key) }
         contexts = contexts.filter { alive.contains($0.key) }
+        coachStates = coachStates.filter { alive.contains($0.key) }
         if let cur = currentPID, !alive.contains(cur) { currentPID = nil }
 
         guard !sessions.isEmpty else {
@@ -1066,6 +1107,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         guard pid != currentPID else { return }
         if let cur = currentPID {
             drafts[cur] = textView.string; draftsDictated[cur] = liveDictated; contexts[cur] = liveContext
+            if showsCoachResult { coachStates[cur] = coachState } // back when its tab is
         }
         currentPID = pid
         textView.string = drafts[pid] ?? ""
@@ -1077,12 +1119,18 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         renderContext()
         textView.suggestion = nil
         clearGrammar() // the previous session's suggestions don't apply to this draft
-        dismissCoach()
+        // A running check belongs to the draft we left; this one's correction, if
+        // it has one, comes back with it.
+        coachTask?.cancel()
+        coachTask = nil
+        coach.cancel()
+        coachState = coachStates.removeValue(forKey: pid)
+        renderCoach()
         updateSessionLabel(targetPID: pid)
         let end = (textView.string as NSString).length
         textView.setSelectedRange(NSRange(location: end, length: 0))
         // Re-review the draft we just switched to (no-op if it's empty).
-        if !textView.string.isEmpty { updateGrammar() }
+        if !textView.string.isEmpty && coachState == nil { updateGrammar() }
     }
 
     /// Poll Warp's focused tab; act only when the title actually changes. The send
@@ -1274,7 +1322,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             NSSound.beep(); return
         }
         var deep = false
-        if case .result(let r, let d) = coachState, d == draft {
+        if case .result(let r, let d) = coachState, !isEdited(since: d) {
             guard !EnglishCoach.isDeep(r.model) else { NSSound.beep(); return } // already deep
             deep = true
         }
@@ -1289,7 +1337,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             guard let self else { return }
             do {
                 let result = try await self.coach.check(draft, deep: deep, context: context)
-                guard !Task.isCancelled, self.textView.string == draft else { return }
+                // Edits made while it ran don't void it: it lands as a correction
+                // of the draft it saw. A session switch or ⎋ cancels it.
+                guard !Task.isCancelled else { return }
                 self.coachState = .result(result, draft: draft)
                 self.unsentChecks[self.currentPID ?? 0] = ComposerSend(
                     text: result.native,
@@ -1300,7 +1350,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             } catch is CancellationError {
                 return
             } catch {
-                guard !Task.isCancelled, self.textView.string == draft else { return }
+                guard !Task.isCancelled else { return }
                 self.coachState = .failed(error.localizedDescription)
             }
             self.renderCoach()
@@ -1327,15 +1377,55 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         renderCoach()
     }
 
+    private var showsCoachResult: Bool {
+        if case .result = coachState { return true }
+        return false
+    }
+
+    /// The draft changed since `draft` was checked — a space or newline at the
+    /// ends doesn't count.
+    private func isEdited(since draft: String) -> Bool {
+        let trim = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return trim(draft) != trim(textView.string)
+    }
+
+    /// The footer keys that apply to what's on screen now.
+    private var coachHint: String {
+        switch coachState {
+        case nil:
+            return idleHint
+        case .loading:
+            return "⌥↵ \(enterVerb) without waiting   ⎋ cancel"
+        case .failed:
+            return "↵ \(enterVerb)\(copyHint)   ⌘K retry   ⎋ close panel"
+        case .result(let r, let draft):
+            // Edited: ⌘K checks the new text; otherwise it re-checks this one deeper.
+            let recheck = isEdited(since: draft) ? "   ⌘K check again"
+                : EnglishCoach.isDeep(r.model) || r.isClean(for: draft) ? "" : "   ⌘K deeper"
+            let sendWhat = r.isReply ? "reply" : r.isTranslation ? "English" : "corrected"
+            return r.isClean(for: draft) ? "↵ \(enterVerb)\(copyHint)\(recheck)   ⎋ close panel"
+                : "↵ \(enterVerb) \(sendWhat)   ⌥↵ mine\(copyHint)\(recheck)   ⎋ close panel"
+        }
+    }
+
+    /// Mark in the text box what the coach removed (red, struck), only on the
+    /// draft's words that are still there — so the marks fade as they're fixed
+    /// by hand. Cleared whenever there's no result.
+    private func refreshCoachMarks() {
+        var marks: [(range: NSRange, slip: Bool)] = []
+        if case .result(let r, let draft) = coachState, !r.isTranslation, !r.isClean(for: draft) {
+            marks = TrackChanges.removedRanges(from: draft, to: r.native, in: textView.string)
+        }
+        textView.setCoachRemovals(marks)
+    }
+
     /// Rebuild the coaching panel for `coachState`, resize the window to fit, and
     /// swap the footer hint to the keys that apply right now.
     private func renderCoach() {
         coachStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let width = max(200, frame.width - 40)
         var rows: [NSView] = []
-        var hint = idleHint
 
-        var removals: [(range: NSRange, slip: Bool)] = []
         switch coachState {
         case nil:
             break
@@ -1352,20 +1442,13 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             let row = NSStackView(views: [spinner, label])
             row.spacing = 8
             rows.append(row)
-            hint = "⌥↵ \(enterVerb) without waiting   ⎋ cancel"
         case .failed(let message):
             rows.append(coachLabel("Couldn't check: \(message)", size: 12, color: .systemRed, width: width))
-            hint = "↵ \(enterVerb)\(copyHint)   ⌘K retry   ⎋ close panel"
         case .result(let r, let draft):
             rows += coachRows(r, draft: draft, width: width)
-            if !r.isTranslation && !r.isClean(for: draft) { removals = TrackChanges.removedRanges(from: draft, to: r.native) }
-            let deeper = EnglishCoach.isDeep(r.model) ? "" : "   ⌘K deeper"
-            let sendWhat = r.isReply ? "reply" : r.isTranslation ? "English" : "corrected"
-            hint = r.isClean(for: draft) ? "↵ \(enterVerb)\(copyHint)   ⎋ back to edit"
-                : "↵ \(enterVerb) \(sendWhat)   ⌥↵ mine\(copyHint)\(deeper)   ⎋ edit"
         }
 
-        textView.setCoachRemovals(removals) // cleared whenever there's no result
+        refreshCoachMarks()
         for row in rows {
             coachStack.addArrangedSubview(row)
             // Full-width hairlines; constrained only once inside the stack (an
@@ -1373,7 +1456,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             if row is SeparatorLine { row.widthAnchor.constraint(equalTo: coachStack.widthAnchor).isActive = true }
         }
         coachScroll.isHidden = rows.isEmpty
-        hintLabel.stringValue = hint
+        hintLabel.stringValue = coachHint
         hintLabel.textColor = .tertiaryLabelColor // a pending "✓ Copied" flash ends here
 
         // Measure the stack at the panel's width, cap it, and grow the window.
@@ -1575,7 +1658,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         return super.performKeyEquivalent(with: event)
     }
 
-    /// Esc closes the coaching panel first (back to editing); otherwise the composer.
+    /// Esc closes the coaching panel first; otherwise the composer.
     private func handleEscape() {
         if coachState != nil {
             dismissCoach()
@@ -1585,46 +1668,55 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
     }
 
-    /// Enter. With a coaching result showing, sends the native-US version (or the
-    /// draft itself when the coach found nothing to fix). While a check is still
-    /// running, Enter waits — ⌥↵ sends the draft as-is without waiting.
-    @objc func submit() {
+    /// What Enter (and ⌘⇧C) puts out: with a correction showing, the coach's
+    /// version — even after the draft was edited under it, so the corrected
+    /// option stays while the marked words are fixed by hand — or the draft
+    /// itself when there was nothing to fix. nil while a check is running.
+    private func outgoing() -> (text: String, coach: CoachResult?, corrected: Bool, draft: String)? {
+        let text = textView.string
         switch coachState {
         case .loading:
-            NSSound.beep()
-        case .result(let r, let draft) where draft == textView.string && !r.isClean(for: draft):
-            send(r.native, coach: r, corrected: true)
+            return nil
+        case .result(let r, let draft) where !r.isClean(for: draft):
+            return (r.native, r, true, draft)
+        case .result(let r, let draft):
+            return (text, r, false, draft)
         default:
-            send(textView.string, coach: currentCoachResult, corrected: false)
+            return (text, nil, false, text)
         }
     }
 
-    /// ⌥Enter while coaching: send the draft exactly as written.
+    /// Enter. While a check is still running, Enter waits — ⌥↵ sends the draft
+    /// as-is without waiting.
+    @objc func submit() {
+        guard let out = outgoing() else { NSSound.beep(); return }
+        send(out.text, coach: out.coach, corrected: out.corrected, draft: out.draft)
+    }
+
+    /// ⌥Enter while coaching: send the text box as it is. Edited under a
+    /// correction, it was rewritten from the marked fixes, so it goes as
+    /// coach-corrected (`;;tf+`) and the checked draft stays the writer's attempt
+    /// in the log — the copied fixes never count as their own English.
     private func submitOriginal() {
+        if case .result(let r, let draft) = coachState, isEdited(since: draft) {
+            return send(textView.string, coach: r, corrected: !r.isClean(for: draft), draft: draft)
+        }
         send(textView.string, coach: currentCoachResult, corrected: false)
     }
 
     /// ⌘⇧C: put the text on the clipboard instead of sending it to Claude — for a
-    /// quick correction to paste into another app. Same choice as Enter (the
-    /// coach's version when there's a correction, else the draft). Like a send,
-    /// the draft clears; with "keep open" on the composer stays up for the next
-    /// one, otherwise it closes so focus returns to the previous app.
+    /// quick correction to paste into another app. Same choice as Enter. Like a
+    /// send, the draft clears; with "keep open" on the composer stays up for the
+    /// next one, otherwise it closes so focus returns to the previous app.
     private func copyForElsewhere() {
-        let (raw, coach, corrected): (String, CoachResult?, Bool)
-        switch coachState {
-        case .loading:
-            NSSound.beep(); return
-        case .result(let r, let draft) where draft == textView.string && !r.isClean(for: draft):
-            (raw, coach, corrected) = (r.native, r, true)
-        default:
-            (raw, coach, corrected) = (textView.string, currentCoachResult, false)
-        }
-        copy(raw, coach: coach, corrected: corrected)
+        guard let out = outgoing() else { NSSound.beep(); return }
+        copy(out.text, coach: out.coach, corrected: out.corrected, draft: out.draft)
     }
 
     /// The copy itself — ⌘⇧C, and Enter / ⌥↵ when terminal mode is off. Logged
     /// to wingman-english as `destination: "clipboard"` when ⌘K checked it.
-    private func copy(_ raw: String, coach: CoachResult?, corrected: Bool) {
+    /// `draft` is what the writer wrote, when not the text box (see `outgoing`).
+    private func copy(_ raw: String, coach: CoachResult?, corrected: Bool, draft: String? = nil) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { NSSound.beep(); return }
         let pb = NSPasteboard.general
@@ -1632,7 +1724,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         pb.setString(text, forType: .string)
         WingmanEnglishLog.record(ComposerSend(
             text: text,
-            draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            draft: (draft ?? textView.string).trimmingCharacters(in: .whitespacesAndNewlines),
             dictated: liveDictated, coach: coach, corrected: corrected,
             cwd: nil, destination: .clipboard, reply: liveContext != nil))
         unsentChecks[currentPID ?? 0] = nil
@@ -1652,18 +1744,18 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.hintLabel.stringValue == message else { return }
             self.hintLabel.textColor = .tertiaryLabelColor
-            self.hintLabel.stringValue = self.idleHint
+            self.hintLabel.stringValue = self.coachHint
         }
     }
 
     /// The coach's result, if it was computed for exactly the visible draft.
     private var currentCoachResult: CoachResult? {
-        if case .result(let r, let draft) = coachState, draft == textView.string { return r }
+        if case .result(let r, let draft) = coachState, !isEdited(since: draft) { return r }
         return nil
     }
 
-    private func send(_ raw: String, coach: CoachResult?, corrected: Bool) {
-        guard terminalMode else { return copy(raw, coach: coach, corrected: corrected) }
+    private func send(_ raw: String, coach: CoachResult?, corrected: Bool, draft: String? = nil) {
+        guard terminalMode else { return copy(raw, coach: coach, corrected: corrected, draft: draft) }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             NSSound.beep()
@@ -1671,7 +1763,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         let send = ComposerSend(
             text: text,
-            draft: textView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            draft: (draft ?? textView.string).trimmingCharacters(in: .whitespacesAndNewlines),
             dictated: liveDictated, coach: coach, corrected: corrected,
             cwd: sessions.first(where: { $0.pid == currentPID })?.cwd, reply: liveContext != nil)
         // If the send failed (e.g. Warp not running), keep the text and the
@@ -1804,7 +1896,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             ? "Terminal mode: ↵ sends to the Claude session in Warp's front tab. ⌘T → copy mode"
             : "Copy mode: ↵ copies the text to paste anywhere; nothing goes to Warp. ⌘T → terminal mode"
         sessionLabel.isHidden = !on
-        if coachState == nil { hintLabel.stringValue = idleHint } else { renderCoach() }
+        hintLabel.stringValue = coachHint
         if on, isVisible {
             lastWarpTitle = nil   // force the first poll to follow
             followTick()
@@ -1817,6 +1909,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     @objc private func keepOpenToggled(_ sender: NSButton) {
         keepOpen = (sender.state == .on)
         makeFirstResponder(textView) // keep typing focus after clicking the box
+    }
+
+    @objc private func allDesktopsToggled(_ sender: NSButton) {
+        allDesktops = (sender.state == .on)
+        applyDesktopBehavior()
+        makeFirstResponder(textView)
     }
 
     @objc private func startDictationClicked() {
