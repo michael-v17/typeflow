@@ -32,17 +32,25 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private let coachScroll = NSScrollView()
     private let coachStack = NSStackView()
     private var coachPanelHeight: NSLayoutConstraint!
+    /// The text area's height — the base the panels add to. A manual resize
+    /// moves it, and it's remembered with the width (`rememberSize`).
+    private var scrollHeight: NSLayoutConstraint!
+    private static let widthKey = "TypeFlowComposerWidth"
+    private static let textHeightKey = "TypeFlowComposerTextHeight"
+    private static var savedTextHeight: CGFloat {
+        let h = UserDefaults.standard.double(forKey: textHeightKey)
+        return h > 0 ? h : 200
+    }
     private var coachExtraHeight: CGFloat = 0
     private static let coachMaxHeight: CGFloat = 360
-    private static let defaultHint = "↵ send   ⌘K check English   ⇧↵ newline   ⎋ close"
-    /// The resting hint: with a message to answer, ⌘K suggests a reply instead.
+    private static let defaultHint = "↵ send   ⌘K check English"
+    /// The resting hint: the two main keys only; the full list is in the ⋯ menu.
+    /// With a message to answer, ⌘K suggests a reply instead.
     private var idleHint: String {
-        "↵ \(enterVerb)   ⌘K \(liveContext == nil ? "check English" : "suggest reply")   ⇧↵ newline   ⎋ close"
+        "↵ \(enterVerb)   ⌘K \(liveContext == nil ? "check English" : "suggest reply")"
     }
     /// What Enter does right now: send into Warp, or copy (terminal mode off).
     private var enterVerb: String { terminalMode ? "send" : "copy" }
-    /// The "⌘⇧C copy" hint — redundant when Enter already copies.
-    private var copyHint: String { terminalMode ? "   ⌘⇧C copy" : "" }
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
     /// Footer pill: where Enter goes — Warp (terminal mode) or the clipboard. ⌘T.
@@ -54,11 +62,14 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// copied or swapped for another session's.
     private var languageLocked = false
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
-    private let keepOpenCheckbox = NSButton(checkboxWithTitle: "keep open", target: nil, action: nil)
-    private let allDesktopsCheckbox = NSButton(checkboxWithTitle: "all desktops", target: nil, action: nil)
+    /// Header ⋯: keep open, all desktops, Warp/Copy and the full shortcut list.
+    private let moreButton = NSButton()
     /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
     private let coachPicker = NSPopUpButton(frame: .zero, pullsDown: true)
     private let dictateButton = NSButton()
+    /// ▶ / ⌥⌘S: read aloud what Enter would send; ■ while it reads.
+    private let speakButton = NSButton()
+    private let speaker = Speaker()
     /// Reply mode: the message being answered (⌘⇧V from the clipboard). With one
     /// set, ⌘K suggests a reply built from the draft's idea. Per session, like the
     /// draft; cleared on send. Never logged.
@@ -149,7 +160,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // .fullSizeContentView + transparent title bar + hidden buttons so
         // the composer still looks borderless.
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 300),
             styleMask: [.titled, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -157,7 +168,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         configureWindow()
         hideTitleBarChrome()
         buildContent()
+        restoreSize()
         center()
+        NotificationCenter.default.addObserver(self, selector: #selector(rememberSize),
+                                               name: NSWindow.didEndLiveResizeNotification, object: self)
         // Warm the on-device model once so the first phrase completion is fast.
         // No-op (logs to stderr) if Foundation Models isn't available.
         ghostCompleter.bootstrap()
@@ -191,7 +205,30 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
         animationBehavior = .utilityWindow
-        minSize = NSSize(width: 460, height: 160)
+        minSize = NSSize(width: 560, height: 220)
+    }
+
+    private var textHeight: CGFloat { textView.enclosingScrollView?.frame.height ?? scrollHeight.constant }
+
+    /// Open at the remembered size: the width as left, the height as the fixed
+    /// chrome plus the remembered text height. Clamped to the screen.
+    private func restoreSize() {
+        contentView?.layoutSubtreeIfNeeded()
+        let chrome = frame.height - textHeight
+        let saved = UserDefaults.standard.double(forKey: Self.widthKey)
+        let visible = (screen ?? NSScreen.main)?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+        let width = min(max(saved > 0 ? saved : 760, minSize.width), visible.width - 40)
+        let text = min(scrollHeight.constant, visible.height - chrome - 120)
+        scrollHeight.constant = max(text, 60)
+        setContentSize(NSSize(width: width, height: chrome + scrollHeight.constant))
+    }
+
+    /// After a manual resize: the text area keeps the height it was given (the
+    /// panels still add to it), and the size is remembered for next time.
+    @objc private func rememberSize() {
+        scrollHeight.constant = textHeight
+        UserDefaults.standard.set(frame.width, forKey: Self.widthKey)
+        UserDefaults.standard.set(textHeight, forKey: Self.textHeightKey)
     }
 
     /// Default (.moveToActiveSpace): the composer floats above other windows but
@@ -236,7 +273,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
 
-        let initialSize = NSSize(width: 600, height: 140)
+        let initialSize = NSSize(width: 720, height: 200)
         textView.frame = NSRect(origin: .zero, size: initialSize)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
@@ -343,23 +380,20 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.lineBreakMode = .byTruncatingTail
+        // The session name gives way first, then the hint; the tool icons never do.
+        hintLabel.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
 
-        keepOpenCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        keepOpenCheckbox.controlSize = .small
-        keepOpenCheckbox.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-        keepOpenCheckbox.target = self
-        keepOpenCheckbox.action = #selector(keepOpenToggled(_:))
-        keepOpenCheckbox.state = keepOpen ? .on : .off
-        keepOpenCheckbox.toolTip = "Sending (↵) or copying (⌘⇧C) clears the draft without closing the composer"
-
-        allDesktopsCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        allDesktopsCheckbox.controlSize = .small
-        allDesktopsCheckbox.attributedTitle = NSAttributedString(string: "all desktops", attributes: [
-            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
-        allDesktopsCheckbox.target = self
-        allDesktopsCheckbox.action = #selector(allDesktopsToggled(_:))
-        allDesktopsCheckbox.state = allDesktops ? .on : .off
-        allDesktopsCheckbox.toolTip = "Show the composer on every desktop, where you left it. Off: it opens centered on the desktop you're on"
+        moreButton.translatesAutoresizingMaskIntoConstraints = false
+        moreButton.isBordered = false
+        moreButton.bezelStyle = .accessoryBarAction
+        moreButton.imagePosition = .imageOnly
+        moreButton.image = NSImage(systemSymbolName: "ellipsis.circle",
+                                   accessibilityDescription: "Options")
+        moreButton.contentTintColor = .tertiaryLabelColor
+        moreButton.toolTip = "Options and shortcuts"
+        moreButton.target = self
+        moreButton.action = #selector(showMoreMenu)
 
         coachPicker.translatesAutoresizingMaskIntoConstraints = false
         coachPicker.isBordered = false
@@ -377,9 +411,22 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         dictateButton.image = NSImage(systemSymbolName: "mic.fill",
                                       accessibilityDescription: "Dictate")
         dictateButton.contentTintColor = .tertiaryLabelColor
-        dictateButton.toolTip = "Dictate (Apple dictation)"
+        dictateButton.toolTip = "Dictate (Apple dictation). Lit: this draft is sent as dictated (;;v); click to unmark"
         dictateButton.target = self
         dictateButton.action = #selector(startDictationClicked)
+
+        speakButton.translatesAutoresizingMaskIntoConstraints = false
+        speakButton.isBordered = false
+        speakButton.bezelStyle = .accessoryBarAction
+        speakButton.imagePosition = .imageOnly
+        speakButton.image = NSImage(systemSymbolName: "play.fill",
+                                    accessibilityDescription: "Read aloud")
+        speakButton.contentTintColor = .tertiaryLabelColor
+        speakButton.toolTip = "Read aloud (⌥⌘S): the correction if there is one, else the draft"
+        speakButton.target = self
+        speakButton.action = #selector(toggleSpeaking)
+
+        speaker.onFinish = { [weak self] in self?.refreshSpeakButton() }
 
         // Grammar suggestions panel: a vertical list shown between the text and
         // the footer when the reviewer finds issues; the window grows to fit it.
@@ -420,9 +467,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         footer.addSubview(modeButton)
         footer.addSubview(sessionLabel)
         footer.addSubview(hintLabel)
-        footer.addSubview(keepOpenCheckbox)
         footer.addSubview(dictateButton)
         footer.addSubview(langButton)
+        footer.addSubview(speakButton)
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -450,7 +497,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // The coach picker shares the header row with × — the footer has no room
         // once the coach's longer hints show.
         container.addSubview(coachPicker)
-        container.addSubview(allDesktopsCheckbox)
+        container.addSubview(moreButton)
         // Reply mode lives on the header row's left: the button that takes the
         // copied message, and under it the box showing that message.
         replyButton.translatesAutoresizingMaskIntoConstraints = false
@@ -476,12 +523,14 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             closeButton.widthAnchor.constraint(equalToConstant: 18),
             closeButton.heightAnchor.constraint(equalToConstant: 18),
             coachPicker.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            coachPicker.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
-            allDesktopsCheckbox.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            allDesktopsCheckbox.trailingAnchor.constraint(equalTo: coachPicker.leadingAnchor, constant: -12),
+            moreButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            moreButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
+            moreButton.widthAnchor.constraint(equalToConstant: 18),
+            moreButton.heightAnchor.constraint(equalToConstant: 18),
+            coachPicker.trailingAnchor.constraint(equalTo: moreButton.leadingAnchor, constant: -6),
             replyButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             replyButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
-            replyButton.trailingAnchor.constraint(lessThanOrEqualTo: allDesktopsCheckbox.leadingAnchor, constant: -8),
+            replyButton.trailingAnchor.constraint(lessThanOrEqualTo: coachPicker.leadingAnchor, constant: -8),
             contextBox.topAnchor.constraint(equalTo: container.topAnchor, constant: 30),
             contextBox.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             contextBox.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
@@ -492,7 +541,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // scroll view is the only unconstrained element in the vertical chain and
         // greedily absorbs the window growth meant for the grammar panel —
         // collapsing the panel to height 0 (the bug that hid the suggestions).
-        let scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 140)
+        scrollHeight = scroll.heightAnchor.constraint(equalToConstant: Self.savedTextHeight)
         scrollHeight.priority = .defaultHigh
 
         // Below the header row, or below the reply context when there is one.
@@ -528,11 +577,13 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             sessionLabel.leadingAnchor.constraint(equalTo: modeButton.trailingAnchor, constant: 6),
             sessionLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             sessionLabel.trailingAnchor.constraint(lessThanOrEqualTo: langButton.leadingAnchor, constant: -8),
-            langButton.trailingAnchor.constraint(equalTo: dictateButton.leadingAnchor, constant: -8),
+            langButton.trailingAnchor.constraint(equalTo: speakButton.leadingAnchor, constant: -8),
+            speakButton.trailingAnchor.constraint(equalTo: dictateButton.leadingAnchor, constant: -8),
+            speakButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            speakButton.widthAnchor.constraint(equalToConstant: 16),
+            speakButton.heightAnchor.constraint(equalToConstant: 16),
             langButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            keepOpenCheckbox.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
-            keepOpenCheckbox.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            dictateButton.trailingAnchor.constraint(equalTo: keepOpenCheckbox.leadingAnchor, constant: -12),
+            dictateButton.trailingAnchor.constraint(equalTo: hintLabel.leadingAnchor, constant: -14),
             dictateButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.widthAnchor.constraint(equalToConstant: 16),
             dictateButton.heightAnchor.constraint(equalToConstant: 16),
@@ -715,6 +766,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     func hide() {
+        speaker.stop()
         stopFollowTimer()
         onHide?() // drop the session poll back to idle cadence
         if let cur = currentPID { // preserve draft
@@ -1397,14 +1449,14 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         case .loading:
             return "⌥↵ \(enterVerb) without waiting   ⎋ cancel"
         case .failed:
-            return "↵ \(enterVerb)\(copyHint)   ⌘K retry   ⎋ close panel"
+            return "↵ \(enterVerb)   ⌘K retry"
         case .result(let r, let draft):
             // Edited: ⌘K checks the new text; otherwise it re-checks this one deeper.
             let recheck = isEdited(since: draft) ? "   ⌘K check again"
                 : EnglishCoach.isDeep(r.model) || r.isClean(for: draft) ? "" : "   ⌘K deeper"
             let sendWhat = r.isReply ? "reply" : r.isTranslation ? "English" : "corrected"
-            return r.isClean(for: draft) ? "↵ \(enterVerb)\(copyHint)\(recheck)   ⎋ close panel"
-                : "↵ \(enterVerb) \(sendWhat)   ⌥↵ mine\(copyHint)\(recheck)   ⎋ close panel"
+            return r.isClean(for: draft) ? "↵ \(enterVerb)\(recheck)"
+                : "↵ \(enterVerb) \(sendWhat)   ⌥↵ mine\(recheck)"
         }
     }
 
@@ -1640,6 +1692,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             toggleTerminalMode()
             return true
         }
+        if mods == [.command, .option], event.keyCode == 1 { // ⌥⌘S (⌥ changes the character)
+            toggleSpeaking()
+            return true
+        }
         if mods == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "c" {
             copyForElsewhere()
             return true
@@ -1660,7 +1716,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     /// Esc closes the coaching panel first; otherwise the composer.
     private func handleEscape() {
-        if coachState != nil {
+        if speaker.isSpeaking {
+            speaker.stop()
+        } else if coachState != nil {
             dismissCoach()
             makeFirstResponder(textView)
         } else {
@@ -1768,6 +1826,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             cwd: sessions.first(where: { $0.pid == currentPID })?.cwd, reply: liveContext != nil)
         // If the send failed (e.g. Warp not running), keep the text and the
         // window so the user doesn't lose their prompt.
+        speaker.stop()
         guard onSubmit?(send) == true else { return }
         unsentChecks[currentPID ?? 0] = nil
         clear()
@@ -1906,18 +1965,60 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
     }
 
-    @objc private func keepOpenToggled(_ sender: NSButton) {
-        keepOpen = (sender.state == .on)
-        makeFirstResponder(textView) // keep typing focus after clicking the box
-    }
+    // MARK: - ⋯ menu
 
-    @objc private func allDesktopsToggled(_ sender: NSButton) {
-        allDesktops = (sender.state == .on)
-        applyDesktopBehavior()
+    /// Settings that rarely change, and every shortcut — the footer only names
+    /// the two main keys.
+    @objc private func showMoreMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func toggle(_ title: String, _ on: Bool, _ action: Selector, tip: String) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.state = on ? .on : .off
+            item.toolTip = tip
+        }
+        toggle("Keep open after sending", keepOpen, #selector(keepOpenToggled),
+               tip: "Sending (↵) or copying (⌘⇧C) clears the draft without closing the composer")
+        toggle("Show on all desktops", allDesktops, #selector(allDesktopsToggled),
+               tip: "On every desktop, where you left it. Off: it opens centered on the desktop you're on")
+        toggle("Send to Warp  (⌘T)", terminalMode, #selector(toggleTerminalMode),
+               tip: "Off: ↵ copies the text to paste anywhere; nothing goes to Warp")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Shortcuts", action: nil, keyEquivalent: "").isEnabled = false
+        for line in ["⌘K\tcheck English / suggest reply", "⇧↵\tnewline", "⌥↵\tsend as typed",
+                     "⌘⇧C\tcopy", "⌘⇧V\treply to copied message", "⌥⌘S\tread aloud",
+                     "⌘T\tWarp / copy", "⎋\tclose panel, then composer"] {
+            let item = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
+            let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
+            let tabs = NSMutableParagraphStyle()
+            tabs.tabStops = [NSTextTab(textAlignment: .left, location: 44)]
+            item.attributedTitle = NSAttributedString(string: "  " + parts[0] + "\t" + parts[1], attributes: [
+                .font: NSFont.menuFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: tabs])
+            item.isEnabled = false
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.maxY + 4), in: moreButton)
         makeFirstResponder(textView)
     }
 
+    @objc private func keepOpenToggled() {
+        keepOpen.toggle()
+    }
+
+    @objc private func allDesktopsToggled() {
+        allDesktops.toggle()
+        applyDesktopBehavior()
+    }
+
     @objc private func startDictationClicked() {
+        // Lit already: the click un-marks the draft instead of dictating again.
+        if liveDictated {
+            liveDictated = false
+            refreshDictateButton()
+            makeFirstResponder(textView)
+            return
+        }
         // startDictation: is the selector the system dictation shortcut invokes;
         // calling it on the focused text view starts Apple dictation in the box.
         // Mark this draft as dictated so the send carries the ;;v marker and
@@ -1926,6 +2027,25 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         refreshDictateButton()
         makeFirstResponder(textView)
         textView.perform(Selector(("startDictation:")), with: nil)
+    }
+
+    /// ▶ / ■ / ⌥⌘S: read aloud what Enter would send — the correction or
+    /// suggested reply when there is one, the draft as typed otherwise — or stop.
+    @objc private func toggleSpeaking() {
+        if speaker.isSpeaking { return speaker.stop() }
+        guard let text = outgoing()?.text.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { NSSound.beep(); return }
+        // The coach's version is English even for a Spanish draft, so go by the text read.
+        speaker.speak(text, language: DraftLanguage.detect(text) ?? draftLanguage)
+        refreshSpeakButton()
+        makeFirstResponder(textView)
+    }
+
+    private func refreshSpeakButton() {
+        let on = speaker.isSpeaking
+        speakButton.image = NSImage(systemSymbolName: on ? "stop.fill" : "play.fill",
+                                    accessibilityDescription: on ? "Stop reading" : "Read aloud")
+        speakButton.contentTintColor = on ? .controlAccentColor : .tertiaryLabelColor
     }
 
     /// Sync the mic button tint with the dictated state — it glows accent when the
@@ -2023,3 +2143,4 @@ final class ComposerTextDelegate: NSObject, NSTextViewDelegate {
         onSelectionChanged?()
     }
 }
+
