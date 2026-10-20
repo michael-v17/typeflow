@@ -32,8 +32,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private let coachScroll = NSScrollView()
     private let coachStack = NSStackView()
     private var coachPanelHeight: NSLayoutConstraint!
-    /// The text area's height — the base the panels add to. A manual resize
-    /// moves it, and it's remembered with the width (`rememberSize`).
+    /// The text area's height — the base the panels add to. It hugs the draft
+    /// (`fitTextHeight`): 3 lines when empty, up to `maxTextHeight`, then it scrolls.
     private var scrollHeight: NSLayoutConstraint!
     private static let widthKey = "TypeFlowComposerWidth"
     private static let textHeightKey = "TypeFlowComposerTextHeight"
@@ -41,6 +41,12 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         let h = UserDefaults.standard.double(forKey: textHeightKey)
         return h > 0 ? h : 200
     }
+    /// How tall the text area may grow. A vertical drag of the window sets it,
+    /// remembered with the width (`rememberSize`).
+    private var maxTextHeight: CGFloat = 200
+    /// The text area's height when a live resize began, to tell a vertical drag
+    /// from a width-only one.
+    private var resizeStartTextHeight: CGFloat = 0
     private var coachExtraHeight: CGFloat = 0
     private static let coachMaxHeight: CGFloat = 360
     private static let defaultHint = "↵ send   ⌘K check English"
@@ -170,6 +176,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         buildContent()
         restoreSize()
         center()
+        NotificationCenter.default.addObserver(self, selector: #selector(noteResizeStart),
+                                               name: NSWindow.willStartLiveResizeNotification, object: self)
         NotificationCenter.default.addObserver(self, selector: #selector(rememberSize),
                                                name: NSWindow.didEndLiveResizeNotification, object: self)
         // Warm the on-device model once so the first phrase completion is fast.
@@ -210,25 +218,62 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     private var textHeight: CGFloat { textView.enclosingScrollView?.frame.height ?? scrollHeight.constant }
 
-    /// Open at the remembered size: the width as left, the height as the fixed
-    /// chrome plus the remembered text height. Clamped to the screen.
+    /// The text area's floor: 3 lines, so an empty draft doesn't take half the screen.
+    private var minTextHeight: CGFloat {
+        let font = textView.font ?? NSFont.systemFont(ofSize: 16)
+        return ceil(NSLayoutManager().defaultLineHeight(for: font) * 3 + textView.textContainerInset.height * 2)
+    }
+
+    /// The draft's laid-out height, insets included.
+    private var draftHeight: CGFloat {
+        guard let lm = textView.layoutManager, let tc = textView.textContainer else { return minTextHeight }
+        lm.ensureLayout(for: tc)
+        return ceil(lm.usedRect(for: tc).height + textView.textContainerInset.height * 2)
+    }
+
+    /// Open at the remembered width with the empty draft's 3 lines; the
+    /// remembered text height is how far it grows. Clamped to the screen.
     private func restoreSize() {
         contentView?.layoutSubtreeIfNeeded()
         let chrome = frame.height - textHeight
         let saved = UserDefaults.standard.double(forKey: Self.widthKey)
         let visible = (screen ?? NSScreen.main)?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         let width = min(max(saved > 0 ? saved : 760, minSize.width), visible.width - 40)
-        let text = min(scrollHeight.constant, visible.height - chrome - 120)
-        scrollHeight.constant = max(text, 60)
+        maxTextHeight = max(min(Self.savedTextHeight, visible.height - chrome - 120), minTextHeight)
+        scrollHeight.constant = minTextHeight
+        minSize.height = chrome + minTextHeight
         setContentSize(NSSize(width: width, height: chrome + scrollHeight.constant))
     }
 
-    /// After a manual resize: the text area keeps the height it was given (the
-    /// panels still add to it), and the size is remembered for next time.
+    /// The text area hugs the draft: 3 lines when empty, a line more as it
+    /// wraps, up to `maxTextHeight`, then it scrolls. Top edge fixed, like the panels.
+    private func fitTextHeight() {
+        guard !inLiveResize else { return } // the drag owns the size until it ends
+        let content = draftHeight
+        let target = min(max(content, minTextHeight), maxTextHeight)
+        let delta = target - textHeight
+        scrollHeight.constant = target
+        if abs(delta) > 0.5 { growWindow(by: delta) }
+        // It all fits: undo the scroll the text view made to show the caret.
+        if content <= maxTextHeight, let scroll = textView.enclosingScrollView {
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+
+    @objc private func noteResizeStart() {
+        resizeStartTextHeight = textHeight
+    }
+
+    /// After a manual resize: a vertical drag sets how far the text area grows,
+    /// the width is kept, both remembered; then the text area fits the draft again.
     @objc private func rememberSize() {
-        scrollHeight.constant = textHeight
+        if abs(textHeight - resizeStartTextHeight) > 0.5 {
+            maxTextHeight = max(textHeight, minTextHeight)
+            UserDefaults.standard.set(maxTextHeight, forKey: Self.textHeightKey)
+        }
         UserDefaults.standard.set(frame.width, forKey: Self.widthKey)
-        UserDefaults.standard.set(textHeight, forKey: Self.textHeightKey)
+        fitTextHeight()
     }
 
     /// Default (.moveToActiveSpace): the composer floats above other windows but
@@ -536,8 +581,9 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             contextBox.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
         ])
 
-        // The text area prefers a fixed height (priority high, not required, so a
-        // manual vertical window-resize can still stretch it). Without this the
+        // The text area prefers a set height — the draft's (fitTextHeight) — at
+        // priority high, not required, so a manual vertical window-resize can
+        // still stretch it. Without this the
         // scroll view is the only unconstrained element in the vertical chain and
         // greedily absorbs the window growth meant for the grammar panel —
         // collapsing the panel to height 0 (the bug that hid the suggestions).
@@ -788,6 +834,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     func clear() {
         textView.string = ""
+        fitTextHeight()
         languageLocked = false
         refreshDraftLanguage()
         textView.suggestion = nil
@@ -831,6 +878,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         refreshDraftLanguage()
         autocorrectContraction()
+        fitTextHeight()
         updateGhost()
         updateGrammar()
     }
@@ -1163,6 +1211,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         currentPID = pid
         textView.string = drafts[pid] ?? ""
+        fitTextHeight()
         languageLocked = false
         refreshDraftLanguage()
         liveDictated = draftsDictated[pid] ?? false
@@ -1322,6 +1371,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         if reply { showDemoReply(); return }
         let draft = "give me a markdown with the information for this lesson. Don't add extra information."
         textView.string = draft
+        fitTextHeight()
         let r = CoachResult(
             intent: "Ask for a Markdown document with this lesson's information, nothing extra.", score: 90,
             native: "Give me a Markdown document with the information for this lesson. Don’t add anything extra.",
@@ -1350,6 +1400,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             """, source: .text))
         let draft = "yes but first test it in the simulator to make sure nothing breaks"
         textView.string = draft
+        fitTextHeight()
         let r = CoachResult(
             intent: "Agree, but test in the simulator first.", score: 82,
             native: "Yes, but test it in the simulator first to make sure nothing breaks.",
