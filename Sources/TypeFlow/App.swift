@@ -11,16 +11,18 @@ enum TypeFlowMain {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var composer: ComposerWindow!
     var watcher: ProcessWatcher!
     var hotKey: HotKey!
     var correctKey: HotKey!
+    var quickFixKey: HotKey!
     var translateKey: HotKey!
     var translateTap: DoubleTap!
     let services = ServiceProvider()
-    let translationCard = TranslationCard()
+    let card = SelectionCard()
     var statusItem: NSStatusItem!
+    private var cutItem: NSMenuItem!
 
     func applicationWillTerminate(_ notification: Notification) {
         composer.flushUnsentChecks()
@@ -55,13 +57,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Right-click → Correct / Translate with TypeFlow (Services), plus
-        // hotkeys for apps without Services (Warp, most Electron apps).
-        services.onCorrect = { [weak self] text in self?.composer.correctSelection(text) }
-        services.onTranslate = { [weak self] text in self?.translate(text) }
+        // hotkeys for apps without Services (Warp, most Electron apps). The
+        // hotkeys fall back to the clipboard when nothing selected can be read.
+        services.onCorrect = { [weak self] text in
+            // The app waits for this call to return before it takes any key.
+            DispatchQueue.main.async {
+                if SelectedText.cutWhenCorrecting { SelectedText.cutFromFrontApp() }
+                self?.composer.correctSelection(text)
+            }
+        }
+        services.onTranslate = { [weak self] text in self?.card.show(translating: text, near: SelectedText.bounds()) }
         NSApp.servicesProvider = services
         NSUpdateDynamicServices()
         correctKey = HotKey(keyCode: UInt32(kVK_ANSI_E), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
-            self?.withSelection { self?.composer.correctSelection($0) }
+            self?.withSelection(cut: SelectedText.cutWhenCorrecting) { self?.composer.correctSelection($0.text) }
+        }
+        // ⌥⌘K: the correction in place, no composer — for quick chat replies.
+        quickFixKey = HotKey(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.withSelection { grab in
+                self?.card.show(correcting: grab.text, near: grab.fromClipboard ? nil : SelectedText.bounds(),
+                                replaceIn: grab.app)
+            }
         }
         translateKey = HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
             self?.withSelection { self?.translate($0) }
@@ -136,9 +152,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Open Composer  ⌥Space",
                      action: #selector(toggleComposer),
                      keyEquivalent: "").target = self
-        let hint = menu.addItem(withTitle: "Select text, then ⌥⌘E correct · ⌥ ⌥ or ⌥⌘T translate",
-                                action: nil, keyEquivalent: "")
-        hint.isEnabled = false
+        for line in ["Select or copy text, then:", "   ⌥⌘E  correct in the composer",
+                     "   ⌥⌘K  quick fix in place", "   ⌥ ⌥ or ⌥⌘T  translate"] {
+            menu.addItem(withTitle: line, action: nil, keyEquivalent: "").isEnabled = false
+        }
+        cutItem = menu.addItem(withTitle: "Cut the selection when correcting",
+                               action: #selector(cutToggled), keyEquivalent: "")
+        cutItem.target = self
+        cutItem.toolTip = "⌥⌘E removes the selected text from its app (the original stays on the clipboard), so the correction pastes in its place"
+        menu.delegate = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit TypeFlow",
                      action: #selector(NSApp.terminate(_:)),
@@ -153,22 +175,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         composer.toggle()
     }
 
-    /// The front app's selection, for the ⌥⌘E / ⌥⌘T hotkeys; a beep when none.
-    private func withSelection(_ use: @escaping (String) -> Void) {
+    @objc private func cutToggled() {
+        SelectedText.cutWhenCorrecting.toggle()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        cutItem.state = SelectedText.cutWhenCorrecting ? .on : .off // the ⋯ menu toggles it too
+    }
+
+    /// The front app's selection (else the clipboard), for the selection hotkeys;
+    /// a beep when there's no text.
+    private func withSelection(cut: Bool = false, _ use: @escaping (SelectedText.Grab) -> Void) {
         // Let the hotkey's key-up land first, so the ⌘C fallback isn't mixed with it.
         DispatchQueue.main.async {
-            let grabbed = SelectedText.grab()
+            let grabbed = SelectedText.grab(cut: cut)
             if ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1" {
-                fputs("TypeFlow: selection hotkey in \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"), got \(grabbed?.count ?? -1) chars\n", stderr)
+                fputs("TypeFlow: selection hotkey in \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"), got \(grabbed?.text.count ?? -1) chars\(grabbed?.fromClipboard == true ? " from the clipboard" : "")\n", stderr)
             }
-            guard let text = grabbed,
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { NSSound.beep(); return }
-            use(text)
+            guard let grabbed,
+                  !grabbed.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { NSSound.beep(); return }
+            use(grabbed)
         }
     }
 
-    private func translate(_ text: String) {
-        translationCard.show(translating: text, near: SelectedText.bounds())
+    private func translate(_ grab: SelectedText.Grab) {
+        card.show(translating: grab.text, near: grab.fromClipboard ? nil : SelectedText.bounds())
     }
 
     private func refreshStatus(sessions: [ClaudeSession], targetPID: pid_t? = nil) {

@@ -283,8 +283,9 @@ final class EnglishCoach {
 
     private var process: Process?
     /// `--disable <feature>` args, computed once from `codex features list` so
-    /// the list tracks whatever the installed Codex version ships.
-    private var disableArgs: [String]?
+    /// the list tracks whatever the installed Codex version ships. Shared by the
+    /// composer's coach and the quick correction's.
+    private static var disableArgs: [String]?
 
     /// The rules + schema for one kind of check: a plain English check, or a
     /// reply to a message (`context`). Files live in `workDir()`.
@@ -370,7 +371,7 @@ final class EnglishCoach {
     private func checkWithCodex(_ text: String, model: String, mode: Mode, image: URL?,
                                 dir: URL) async throws -> Data {
         guard let codex = Self.codexURL() else { throw CoachError.codexNotFound }
-        if disableArgs == nil { disableArgs = await Self.featureDisableArgs(codex: codex) }
+        if Self.disableArgs == nil { Self.disableArgs = await Self.featureDisableArgs(codex: codex) }
 
         let out = dir.appendingPathComponent("last-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: out) }
@@ -385,7 +386,7 @@ final class EnglishCoach {
             "--output-schema", dir.appendingPathComponent(mode.schemaFile).path,
             "-o", out.path,
         ]
-        args += disableArgs ?? []
+        args += Self.disableArgs ?? []
         // Last: `-i` takes every value up to the next flag.
         if let image { args += ["-i", image.path] }
         // The draft goes in via stdin (no positional prompt), so text starting

@@ -2112,6 +2112,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
                tip: "On every desktop, where you left it. Off: it opens centered on the desktop you're on")
         toggle("Send to Warp  (⌘T)", terminalMode, #selector(toggleTerminalMode),
                tip: "Off: ↵ copies the text to paste anywhere; nothing goes to Warp")
+        toggle("Cut the selection when correcting  (⌥⌘E)", SelectedText.cutWhenCorrecting, #selector(cutToggled),
+               tip: "The selected text leaves its app (the original stays on the clipboard), so the correction pastes in its place")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Shortcuts", action: nil, keyEquivalent: "").isEnabled = false
         for line in ["⌘K\tcheck English / suggest reply", "⇧↵\tnewline", "⌥↵\tsend as typed",
@@ -2132,6 +2134,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     @objc private func keepOpenToggled() {
         keepOpen.toggle()
+    }
+
+    @objc private func cutToggled() {
+        SelectedText.cutWhenCorrecting.toggle()
     }
 
     @objc private func allDesktopsToggled() {
