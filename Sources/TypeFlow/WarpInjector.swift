@@ -130,7 +130,7 @@ enum WarpInjector {
 
     // MARK: - Helpers
 
-    private static func waitForModifierRelease() {
+    static func waitForModifierRelease() {
         let held: CGEventFlags = [.maskAlternate, .maskCommand, .maskControl, .maskShift]
         let deadline = Date().addingTimeInterval(modifierReleaseTimeout)
         while !CGEventSource.flagsState(.hidSystemState).intersection(held).isEmpty,

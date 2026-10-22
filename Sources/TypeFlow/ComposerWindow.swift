@@ -56,7 +56,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         "↵ \(enterVerb)   ⌘K \(liveContext == nil ? "check English" : "suggest reply")"
     }
     /// What Enter does right now: send into Warp, or copy (terminal mode off).
-    private var enterVerb: String { terminalMode ? "send" : "copy" }
+    private var enterVerb: String { sendsToWarp ? "send" : "copy" }
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private let sessionLabel = NSTextField(labelWithString: "→ no Claude Code session")
     /// Footer pill: where Enter goes — Warp (terminal mode) or the clipboard. ⌘T.
@@ -136,6 +136,23 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         get { (UserDefaults.standard.object(forKey: Self.terminalModeKey) as? Bool) ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.terminalModeKey) }
     }
+    /// Where Enter goes now: a selection brought in from another app always copies.
+    private var sendsToWarp: Bool { terminalMode && selection == nil }
+
+    /// Text selected in another app (right-click → Correct with TypeFlow, or ⌥⌘E)
+    /// is checked as its own draft: the session's draft is parked here meanwhile
+    /// and comes back after the copy, ⎋ or hide. nil when no selection is up.
+    private struct ParkedDraft {
+        let text: String
+        let dictated: Bool
+        let context: ReplyContext?
+        let coachState: CoachState?
+    }
+    private var selection: ParkedDraft?
+    /// `unsentChecks` key for the selection's ⌘K check (session keys are pids ≥ 0).
+    private static let selectionKey: pid_t = -1
+    /// The `unsentChecks` key of what's on screen.
+    private var checkKey: pid_t { selection != nil ? Self.selectionKey : currentPID ?? 0 }
 
     // Per-session state: a separate draft per Claude session, and live following
     // of whichever Warp tab is focused.
@@ -812,6 +829,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     func hide() {
+        if selection != nil { // the selection's check was never copied
+            flushUnsentCheck(for: Self.selectionKey)
+            endSelection()
+        }
         speaker.stop()
         stopFollowTimer()
         onHide?() // drop the session poll back to idle cadence
@@ -833,6 +854,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     func clear() {
+        if selection != nil { return endSelection() } // the session's own draft is untouched
         textView.string = ""
         fitTextHeight()
         languageLocked = false
@@ -866,7 +888,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// finished word), then refresh the word-completion ghost.
     private func handleTextChange() {
         if textView.string.isEmpty { // draft abandoned, and its correction with it
-            flushUnsentCheck(for: currentPID ?? 0)
+            flushUnsentCheck(for: checkKey)
             dismissCoach()
         } else if case .failed = coachState {
             dismissCoach()
@@ -1135,7 +1157,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         self.sessions = sessions
         // Forget drafts for sessions that no longer exist.
         let alive = Set(sessions.map { $0.pid })
-        for pid in unsentChecks.keys where pid != 0 && !alive.contains(pid) { flushUnsentCheck(for: pid) }
+        for pid in unsentChecks.keys where pid > 0 && !alive.contains(pid) { flushUnsentCheck(for: pid) }
         drafts = drafts.filter { alive.contains($0.key) }
         tabNames = tabNames.filter { alive.contains($0.key) }
         draftsDictated = draftsDictated.filter { alive.contains($0.key) }
@@ -1204,7 +1226,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// Swap the composer to a different session's draft, saving the current one
     /// first so nothing is lost. No-op if already on that session.
     private func switchTo(_ pid: pid_t) {
-        guard pid != currentPID else { return }
+        guard pid != currentPID, selection == nil else { return }
         if let cur = currentPID {
             drafts[cur] = textView.string; draftsDictated[cur] = liveDictated; contexts[cur] = liveContext
             if showsCoachResult { coachStates[cur] = coachState } // back when its tab is
@@ -1362,6 +1384,59 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         followTimer = nil
     }
 
+    // MARK: - Selection from another app
+
+    /// Right-click → Correct with TypeFlow (or ⌥⌘E): open the composer on the
+    /// selected text and check it right away. Enter copies the result and hides
+    /// back to that app; the session's draft is parked until then.
+    func correctSelection(_ text: String) {
+        if selection == nil {
+            if let cur = currentPID { drafts[cur] = textView.string } // in case the session goes away meanwhile
+            selection = ParkedDraft(text: textView.string, dictated: liveDictated, context: liveContext,
+                                    coachState: showsCoachResult ? coachState : nil)
+        } else {
+            flushUnsentCheck(for: Self.selectionKey) // a new selection replaces the last one
+        }
+        coachTask?.cancel()
+        coachTask = nil
+        coach.cancel()
+        coachState = nil
+        loadDraft(text, dictated: false, context: nil)
+        show()
+        startCoach()
+    }
+
+    /// Put the parked session draft back, with its correction if it had one.
+    private func endSelection() {
+        guard let parked = selection else { return }
+        selection = nil
+        coachTask?.cancel()
+        coachTask = nil
+        coach.cancel()
+        coachState = parked.coachState
+        loadDraft(parked.text, dictated: parked.dictated, context: parked.context)
+        refreshTerminalMode()
+    }
+
+    /// Replace the visible draft and everything derived from it (the coach state
+    /// is the caller's).
+    private func loadDraft(_ text: String, dictated: Bool, context: ReplyContext?) {
+        textView.string = text
+        liveDictated = dictated
+        liveContext = context
+        languageLocked = false
+        refreshDraftLanguage()
+        textView.suggestion = nil
+        ghostCompleter.cancel()
+        clearGrammar()
+        refreshDictateButton()
+        renderContext()
+        renderCoach()
+        fitTextHeight()
+        let end = (text as NSString).length
+        textView.setSelectedRange(NSRange(location: end, length: 0))
+    }
+
     // MARK: - English coach (⌘K)
     /// Debug only (`TYPEFLOW_DEMO_COACH=1`, or `=reply` for reply mode): open the
     /// composer with a canned coach result so the panel layout can be checked (and
@@ -1444,7 +1519,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
                 // of the draft it saw. A session switch or ⎋ cancels it.
                 guard !Task.isCancelled else { return }
                 self.coachState = .result(result, draft: draft)
-                self.unsentChecks[self.currentPID ?? 0] = ComposerSend(
+                self.unsentChecks[self.checkKey] = ComposerSend(
                     text: result.native,
                     draft: draft.trimmingCharacters(in: .whitespacesAndNewlines),
                     dictated: self.liveDictated, coach: result, corrected: false,
@@ -1836,9 +1911,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             draft: (draft ?? textView.string).trimmingCharacters(in: .whitespacesAndNewlines),
             dictated: liveDictated, coach: coach, corrected: corrected,
             cwd: nil, destination: .clipboard, reply: liveContext != nil))
-        unsentChecks[currentPID ?? 0] = nil
+        unsentChecks[checkKey] = nil
+        let fromSelection = selection != nil
         clear()
-        if keepOpen {
+        if keepOpen && !fromSelection { // a selection goes back to its app to be pasted
             makeFirstResponder(textView)
             flashHint("✓ Copied — paste it anywhere with ⌘V")
         } else {
@@ -1864,7 +1940,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     private func send(_ raw: String, coach: CoachResult?, corrected: Bool, draft: String? = nil) {
-        guard terminalMode else { return copy(raw, coach: coach, corrected: corrected, draft: draft) }
+        guard sendsToWarp else { return copy(raw, coach: coach, corrected: corrected, draft: draft) }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             NSSound.beep()
@@ -1879,7 +1955,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // window so the user doesn't lose their prompt.
         speaker.stop()
         guard onSubmit?(send) == true else { return }
-        unsentChecks[currentPID ?? 0] = nil
+        unsentChecks[checkKey] = nil
         clear()
         if keepOpen {
             // The send activates Warp; re-focus the composer once it has landed
@@ -1986,6 +2062,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     /// ⌘T / the footer pill: switch Enter between Warp and the clipboard.
     @objc private func toggleTerminalMode() {
+        guard selection == nil else { NSSound.beep(); return } // a selection always copies
         terminalMode.toggle()
         refreshTerminalMode()
         makeFirstResponder(textView)
@@ -1995,7 +2072,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// Copy mode hides the session — nothing is going to Warp — and stops the
     /// follow poll, which only exists to name where a send lands.
     private func refreshTerminalMode() {
-        let on = terminalMode
+        let on = sendsToWarp
         modeButton.image = NSImage(systemSymbolName: on ? "terminal" : "doc.on.clipboard",
                                    accessibilityDescription: nil)
         let color: NSColor = on ? .secondaryLabelColor : .controlAccentColor

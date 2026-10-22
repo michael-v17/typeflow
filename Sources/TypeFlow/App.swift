@@ -15,6 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var composer: ComposerWindow!
     var watcher: ProcessWatcher!
     var hotKey: HotKey!
+    var correctKey: HotKey!
+    var translateKey: HotKey!
+    var translateTap: DoubleTap!
+    let services = ServiceProvider()
+    let translationCard = TranslationCard()
     var statusItem: NSStatusItem!
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -33,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         watcher.start()
         ScreenText.warmUp() // so the first pasted screenshot doesn't wait ~65 s
+        Translator.warmUp() // the first translation is 2–3 s cold
         if let demo = ProcessInfo.processInfo.environment["TYPEFLOW_DEMO_COACH"], demo == "1" || demo == "reply" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.composer.showDemoCoach(reply: demo == "reply")
@@ -46,6 +52,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Option+Space (⌥Space)
         hotKey = HotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) { [weak self] in
             self?.toggleComposer()
+        }
+
+        // Right-click → Correct / Translate with TypeFlow (Services), plus
+        // hotkeys for apps without Services (Warp, most Electron apps).
+        services.onCorrect = { [weak self] text in self?.composer.correctSelection(text) }
+        services.onTranslate = { [weak self] text in self?.translate(text) }
+        NSApp.servicesProvider = services
+        NSUpdateDynamicServices()
+        correctKey = HotKey(keyCode: UInt32(kVK_ANSI_E), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.withSelection { self?.composer.correctSelection($0) }
+        }
+        translateKey = HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.withSelection { self?.translate($0) }
+        }
+        // ⌥ ⌥: the one-finger way to translate, for frequent use.
+        translateTap = DoubleTap(.option) { [weak self] in
+            self?.withSelection { self?.translate($0) }
         }
 
         installMainMenu()
@@ -113,6 +136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Open Composer  ⌥Space",
                      action: #selector(toggleComposer),
                      keyEquivalent: "").target = self
+        let hint = menu.addItem(withTitle: "Select text, then ⌥⌘E correct · ⌥ ⌥ or ⌥⌘T translate",
+                                action: nil, keyEquivalent: "")
+        hint.isEnabled = false
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit TypeFlow",
                      action: #selector(NSApp.terminate(_:)),
@@ -125,6 +151,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ComposerWindow.show / followTick), so just refresh the list here.
         refreshStatus(sessions: watcher.sessions)
         composer.toggle()
+    }
+
+    /// The front app's selection, for the ⌥⌘E / ⌥⌘T hotkeys; a beep when none.
+    private func withSelection(_ use: @escaping (String) -> Void) {
+        // Let the hotkey's key-up land first, so the ⌘C fallback isn't mixed with it.
+        DispatchQueue.main.async {
+            let grabbed = SelectedText.grab()
+            if ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1" {
+                fputs("TypeFlow: selection hotkey in \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"), got \(grabbed?.count ?? -1) chars\n", stderr)
+            }
+            guard let text = grabbed,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { NSSound.beep(); return }
+            use(text)
+        }
+    }
+
+    private func translate(_ text: String) {
+        translationCard.show(translating: text, near: SelectedText.bounds())
     }
 
     private func refreshStatus(sessions: [ClaudeSession], targetPID: pid_t? = nil) {
