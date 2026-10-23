@@ -900,6 +900,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         }
         refreshDraftLanguage()
         autocorrectContraction()
+        capitalizeSentenceStart()
         fitTextHeight()
         updateGhost()
         updateGrammar()
@@ -1099,6 +1100,21 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         let trailing = caret - (wordRange.location + wordRange.length)
         let newCaret = wordRange.location + (corrected as NSString).length + trailing
         textView.setSelectedRange(NSRange(location: newCaret, length: 0))
+        isCorrecting = false
+    }
+
+    /// Capitalize a sentence's first word (and "i'm"…) once it's typed (see
+    /// `ContractionCorrector.sentenceCapital`). Undoable; caret preserved.
+    private func capitalizeSentenceStart() {
+        guard !isCorrecting else { return }
+        let sel = textView.selectedRange()
+        guard sel.length == 0,
+              let fix = ContractionCorrector.sentenceCapital(in: textView.string as NSString, caret: sel.location)
+        else { return }
+        isCorrecting = true
+        textView.insertText(fix.replacement, replacementRange: fix.range)
+        let grown = (fix.replacement as NSString).length - fix.range.length
+        textView.setSelectedRange(NSRange(location: sel.location + grown, length: 0))
         isCorrecting = false
     }
 
