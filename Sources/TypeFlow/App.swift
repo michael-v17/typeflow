@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var quickFixKey: HotKey!
     var translateKey: HotKey!
     var translateTap: DoubleTap!
+    var readKey: HotKey!
+    /// ⌥⌘R's player, with its own voice so it never cuts off the card's or the composer's ▶.
+    let reader = ReadAloudPanel()
     let services = ServiceProvider()
     let card = SelectionCard()
     var statusItem: NSStatusItem!
@@ -85,6 +88,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ⌥ ⌥: the one-finger way to translate, for frequent use.
         translateTap = DoubleTap(.option) { [weak self] in
             self?.withSelection { self?.translate($0) }
+        }
+        // ⌥⌘R: just hear it, no translation — a small player (ReadAloudPanel); again stops.
+        readKey = HotKey(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            guard let self else { return }
+            if self.reader.isReading { return self.reader.stop() }
+            self.withSelection { self.reader.read($0.text, from: $0.app) }
         }
 
         installMainMenu()
@@ -153,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                      action: #selector(toggleComposer),
                      keyEquivalent: "").target = self
         for line in ["Select or copy text, then:", "   ⌥⌘E  correct in the composer",
-                     "   ⌥⌘K  quick fix in place", "   ⌥ ⌥ or ⌥⌘T  translate"] {
+                     "   ⌥⌘K  quick fix in place", "   ⌥ ⌥ or ⌥⌘T  translate", "   ⌥⌘R  read aloud"] {
             menu.addItem(withTitle: line, action: nil, keyEquivalent: "").isEnabled = false
         }
         cutItem = menu.addItem(withTitle: "Cut the selection when correcting",

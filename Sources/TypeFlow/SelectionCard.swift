@@ -14,6 +14,9 @@ final class SelectionCard: NSPanel {
     /// Its own, so a quick correction never cancels the composer's ⌘K.
     private let coach = EnglishCoach()
     private var result: (text: String, language: DraftLanguage)?
+    /// What ▶ reads: always the English side — the translation, or for EN → ES
+    /// the original, to hear how it's said.
+    private var spoken: String?
     private var task: Task<Void, Never>?
     private var monitors: [Any] = []
     private var appObserver: NSObjectProtocol?
@@ -66,7 +69,7 @@ final class SelectionCard: NSPanel {
 
         for (button, symbol, tip, action) in [
             (copyButton, "doc.on.doc", "Copy the translation", #selector(copyClicked)),
-            (speakButton, "play.fill", "Read it aloud", #selector(speakClicked)),
+            (speakButton, "play.fill", "Read the English aloud", #selector(speakClicked)),
         ] {
             button.bezelStyle = .accessoryBarAction
             button.isBordered = false
@@ -110,6 +113,7 @@ final class SelectionCard: NSPanel {
                 let r = try await Translator.translate(text)
                 guard let self, !Task.isCancelled else { return }
                 self.result = (r.text, r.to)
+                self.spoken = r.to == .english ? r.text : text
                 self.showResult("\(r.from.rawValue) → \(r.to.rawValue)", r.text)
                 self.copyButton.isHidden = false
                 self.speakButton.isHidden = false
@@ -153,6 +157,7 @@ final class SelectionCard: NSPanel {
         coach.cancel()
         speaker.stop()
         result = nil
+        spoken = nil
         self.correcting = correcting
         replaceIn = nil
         notPasted = nil
@@ -280,14 +285,14 @@ final class SelectionCard: NSPanel {
     }
 
     @objc private func speakClicked() {
-        guard let result else { return }
-        if speaker.isSpeaking { speaker.stop() } else { speaker.speak(result.text, language: result.language) }
+        guard let spoken else { return }
+        if speaker.isSpeaking { speaker.stop() } else { speaker.speak(spoken, language: .english) }
         refreshSpeakButton()
     }
 
     private func refreshSpeakButton() {
         let playing = speaker.isSpeaking
         speakButton.image = NSImage(systemSymbolName: playing ? "stop.fill" : "play.fill",
-                                    accessibilityDescription: playing ? "Stop" : "Read it aloud")
+                                    accessibilityDescription: playing ? "Stop" : "Read the English aloud")
     }
 }
