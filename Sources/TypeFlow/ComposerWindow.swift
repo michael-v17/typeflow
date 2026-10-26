@@ -70,7 +70,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
     /// Header ⋯: keep open, all desktops, Warp/Copy and the full shortcut list.
     private let moreButton = NSButton()
-    /// Picks who runs ⌘K: Codex · Luna, or a Claude account + model.
+    /// Picks who runs ⌘K: a Codex model (Luna or Terra), a Claude account + model, or Antigravity.
     private let coachPicker = NSPopUpButton(frame: .zero, pullsDown: true)
     private let dictateButton = NSButton()
     /// ▶ / ⌥⌘S: read aloud what Enter would send; ■ while it reads.
@@ -2009,7 +2009,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
                 item.state = choice == current ? .on : .off
             }
         }
-        section("Codex — ChatGPT plan", [.codex])
+        section("Codex — ChatGPT plan", CoachProvider.CodexModel.allCases.map { .codex(model: $0) })
 
         var accounts = CoachProvider.claudeAccounts()
         if case .claude(let a, _) = current, !accounts.contains(a) { accounts.append(a) } // since removed

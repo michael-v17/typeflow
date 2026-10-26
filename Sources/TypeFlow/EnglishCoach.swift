@@ -109,13 +109,21 @@ enum CoachError: LocalizedError {
 /// Who runs the ⌘K check, picked in the composer footer. Each case is one full
 /// choice — provider, account, model — so the menu is one click per row.
 /// Codex · GPT-6 Luna is the default; it measured best (docs/coach-benchmark.md).
+/// Codex · GPT-6.1 Terra is the pick for Spanish drafts: it keeps their meaning better.
 /// Claude and Antigravity are fallbacks for when the ChatGPT allowance runs low.
 enum CoachProvider: Hashable {
-    case codex
+    case codex(model: CodexModel)
     /// `account` names a `~/.claude-<account>` config dir (one per Claude login).
     case claude(account: String, model: ClaudeModel)
     /// Google's `agy` CLI, signed in through ~/.gemini (one account).
     case antigravity
+
+    enum CodexModel: String, CaseIterable {
+        case luna = "gpt-6-luna"
+        case terra = "gpt-6.1-terra"
+    }
+
+    static let `default` = CoachProvider.codex(model: .luna)
 
     enum ClaudeModel: String, CaseIterable {
         case haiku = "claude-haiku-5-5"
@@ -124,24 +132,27 @@ enum CoachProvider: Hashable {
 
     private static let defaultsKey = "coachProvider"
 
-    /// Stored as "codex" | "claude:<account>:<model>" | "antigravity".
+    /// Stored as nothing (Luna) | "codex:<model>" | "claude:<account>:<model>" | "antigravity".
     static var current: CoachProvider {
         get {
             let parts = (UserDefaults.standard.string(forKey: defaultsKey) ?? "")
                 .split(separator: ":", omittingEmptySubsequences: false).map(String.init)
             switch parts.first {
+            case "codex" where parts.count >= 2:
+                return .codex(model: CodexModel(rawValue: parts[1]) ?? .luna)
             case "claude" where parts.count >= 2:
                 let model = parts.count > 2 ? ClaudeModel(rawValue: parts[2]) : nil
                 return .claude(account: parts[1], model: model ?? .haiku)
             case "antigravity":
                 return .antigravity
             default:
-                return .codex
+                return .default
             }
         }
         set {
             switch newValue {
-            case .codex: UserDefaults.standard.removeObject(forKey: defaultsKey)
+            case .codex(.luna): UserDefaults.standard.removeObject(forKey: defaultsKey)
+            case .codex(let model): UserDefaults.standard.set("codex:\(model.rawValue)", forKey: defaultsKey)
             case .claude(let account, let model):
                 UserDefaults.standard.set("claude:\(account):\(model.rawValue)", forKey: defaultsKey)
             case .antigravity: UserDefaults.standard.set("antigravity", forKey: defaultsKey)
@@ -152,7 +163,7 @@ enum CoachProvider: Hashable {
     /// Default check, and the deeper one (⌘K again).
     var quickModel: String {
         switch self {
-        case .codex: return "gpt-6-luna"
+        case .codex(let model): return model.rawValue
         case .claude(_, let model): return model.rawValue
         case .antigravity: return "gemini-3.8-flash-low"
         }
@@ -168,20 +179,25 @@ enum CoachProvider: Hashable {
     }
 
     /// Every deep model, for telling a deeper result apart from a quick one.
-    static let deepModels: Set = [CoachProvider.codex.deepModel, ClaudeModel.sonnet.rawValue,
+    static let deepModels: Set = [CoachProvider.default.deepModel, ClaudeModel.sonnet.rawValue,
                                   CoachProvider.antigravity.deepModel]
 
-    /// Reasoning effort per model. Codex runs both at low (measured best);
-    /// Haiku at medium is the owner's pick; low is the only Sonnet effort the
-    /// benchmark measured. Gemini's effort is part of its model id.
+    /// Reasoning effort per model. Luna and Sol run at low (measured best);
+    /// Terra at medium (as fast as low, and it got names right that low
+    /// mangled); Haiku at medium is the owner's pick; low is the only Sonnet
+    /// effort the benchmark measured. Gemini's effort is part of its model id.
     static func effort(model: String) -> String {
-        model == ClaudeModel.haiku.rawValue ? "medium" : "low"
+        switch model {
+        case ClaudeModel.haiku.rawValue, CodexModel.terra.rawValue: return "medium"
+        default: return "low"
+        }
     }
 
     /// Human name for a model id, e.g. in the result header.
     static func displayName(model: String) -> String {
         switch model {
         case "gpt-6-luna": return "GPT-6 Luna"
+        case "gpt-6.1-terra": return "GPT-6.1 Terra"
         case "gpt-6-sol": return "GPT-6 Sol"
         case ClaudeModel.haiku.rawValue: return "Haiku 5.5"
         case ClaudeModel.sonnet.rawValue: return "Sonnet 5.5"
@@ -221,7 +237,8 @@ enum CoachProvider: Hashable {
     /// Menu row's second line: what to expect (docs/coach-benchmark.md).
     var menuSubtitle: String {
         switch self {
-        case .codex: return "Best fixes · ~6 s · ⌘K again: GPT-6 Sol"
+        case .codex(.luna): return "Best fixes · ~6 s · ⌘K again: GPT-6 Sol"
+        case .codex(.terra): return "Lighter rewrites, closer translations · ~6 s · ⌘K again: GPT-6 Sol"
         case .claude(_, .haiku): return "~8 s · ⌘K again: Sonnet 5.5"
         case .claude(_, .sonnet): return "~5 s · most consistent Claude"
         case .antigravity: return "~10–25 s · ⌘K again: Flash medium"
@@ -380,7 +397,7 @@ final class EnglishCoach {
             "--ignore-rules", "--ignore-user-config",
             "-s", "read-only",
             "-m", model,
-            "-c", "model_reasoning_effort=low",
+            "-c", "model_reasoning_effort=\(CoachProvider.effort(model: model))",
             "-c", "web_search=disabled",
             "-c", "model_instructions_file=\(dir.appendingPathComponent(mode.rulesFile).path)",
             "--output-schema", dir.appendingPathComponent(mode.schemaFile).path,

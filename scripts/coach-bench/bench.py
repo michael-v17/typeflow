@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """TypeFlow coach benchmark: same prompt + schema, each provider called the way TypeFlow would."""
 import json, subprocess, sys, time, os, tempfile
-# Usage: python3 -I scripts/coach-bench/bench.py [config ...]   (default: all configs)
+# Usage: python3 -I scripts/coach-bench/bench.py [--set translate] [config ...]   (default: all configs)
+# --set translate uses translate.json (real Spanish drafts) instead of sentences.json.
 # Apple runner: swiftc -O scripts/coach-bench/apple.swift -o /tmp/tf-bench-apple
 # Writes results-<configs>.json next to this file. Hooks are off for claude -p, so
 # wingman-english never stores the test drafts as the learner's writing.
@@ -11,8 +12,10 @@ COACH = os.path.expanduser("~/Library/Application Support/TypeFlow/coach")
 PROMPT = open(f"{COACH}/coach.md").read()
 SCHEMA = open(f"{COACH}/schema.json").read()
 HERE = os.path.dirname(os.path.abspath(__file__))
-SENTS = json.load(open(f"{HERE}/sentences.json"))
-RUNS = 3
+SET = sys.argv[2] if sys.argv[1:2] == ["--set"] else None
+ARGS = sys.argv[3:] if SET else sys.argv[1:]
+SENTS = json.load(open(f"{HERE}/{SET or 'sentences'}.json"))
+RUNS = 2 if SET else 3
 
 def codex_disable():
     out = subprocess.run(["codex", "features", "list"], capture_output=True, text=True).stdout
@@ -24,12 +27,12 @@ def codex_disable():
     return args
 DIS = codex_disable()
 
-def run_codex(model, text):
+def run_codex(model, text, effort="low"):
     with tempfile.TemporaryDirectory() as d:
         out = f"{d}/o.json"
         args = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-rules",
                 "--ignore-user-config", "-s", "read-only", "-m", model,
-                "-c", "model_reasoning_effort=low", "-c", "web_search=disabled",
+                "-c", f"model_reasoning_effort={effort}", "-c", "web_search=disabled",
                 "-c", f"model_instructions_file={COACH}/coach.md",
                 "--output-schema", f"{COACH}/schema.json", "-o", out, "--json"] + DIS
         t0 = time.time()
@@ -89,6 +92,8 @@ def run_apple(text):
 
 CONFIGS = {
     "luna":         lambda t: run_codex("gpt-6-luna", t),
+    "terra":        lambda t: run_codex("gpt-6.1-terra", t),
+    "terra-medium": lambda t: run_codex("gpt-6.1-terra", t, "medium"),
     "sol":          lambda t: run_codex("gpt-6-sol", t),
     "haiku-low":    lambda t: run_claude("claude-haiku-5-5", "low", t),
     "haiku-medium": lambda t: run_claude("claude-haiku-5-5", "medium", t),
@@ -109,7 +114,7 @@ def bench(name):
     return rows
 
 if __name__ == "__main__":
-    names = sys.argv[1:] or list(CONFIGS)
+    names = ARGS or list(CONFIGS)
     with ThreadPoolExecutor(len(names)) as ex:
         allrows = [r for rows in ex.map(bench, names) for r in rows]
-    json.dump(allrows, open(f"{HERE}/results-{'-'.join(names)}.json", "w"), ensure_ascii=False, indent=1)
+    json.dump(allrows, open(f"{HERE}/results-{SET + '-' if SET else ''}{'-'.join(names)}.json", "w"), ensure_ascii=False, indent=1)
