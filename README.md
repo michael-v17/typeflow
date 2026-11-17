@@ -31,6 +31,7 @@ Terminal emulators don't use `NSTextView`, so they bypass Apple's entire writing
 - **Apple text intelligence in the composer** — autocorrect, continuous spellcheck, grammar, text replacement, Writing Tools. Smart quotes/dashes are **off** on purpose so `"strings"` and `--flags` in your prompts aren't mangled.
 - **Inline word completion** — finishes the word you're typing (`becom` → `become`) as gray ghost text via the system dictionary: instant, local, English + Spanish auto-detected. **Tab** accepts.
 - **Contraction autocorrect** — `dont` → `don't`, `im` → `I'm`, lone `i` → `I`, on word boundary. A small curated map, so code tokens aren't touched.
+- **⌘K English coach** — checks the draft before you send: grammar and usage feedback with a one-click corrected version (tracked as editable colored changes), run through **your own** `claude` / `codex` CLI. Optional — everything else works without it.
 - **Apple dictation** — a mic button (or your system dictation shortcut) dictates straight into the composer.
 - **Keep-open mode** (default on) — Enter sends but leaves the composer open for rapid multi-send.
 - **Multi-session aware** — the composer **follows the focused Warp tab** and keeps a **separate draft per `claude` session**, so switching tabs never loses what you typed.
@@ -125,6 +126,10 @@ Build helpers in `scripts/`: `make-cert.sh` (stable signing identity, once), `ma
 ## Why this exists
 
 If you spend hours a day writing prose-heavy prompts to Claude Code, doing it in a terminal that bypasses Apple autocorrect is friction you stop noticing but never stop paying. Safari, Notes, Mail, the ChatGPT app — all give you the full Apple writing stack. Your terminal, where you do the most language-dense work of your day, gives you nothing. TypeFlow gives that stack back, scoped to the moments you're talking to an AI agent.
+
+## Privacy
+
+TypeFlow makes **no network calls of its own and collects nothing**. The only thing that leaves the composer is the prompt you send, delivered as keystrokes into your own Warp. The ⌘K coach runs your own `claude`/`codex` CLI with your logins — TypeFlow ships no API keys and talks to no endpoints. An optional local learning-log integration (for an English-practice corpus) is compiled in but stays **completely inert** unless its vault path is explicitly configured on your machine.
 
 ## License
 

@@ -17,3 +17,8 @@ DerivedData/
 .claude/
 .mcp.json
 TypeFlow.app/
+
+## Personal — stays local, never published
+CLAUDE.md
+docs/status.md
+scripts/coach-bench/*.json
