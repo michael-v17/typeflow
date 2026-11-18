@@ -26,7 +26,7 @@ Autocorrect · inline completion · grammar · dictation — right where you tal
 Terminal emulators don't use `NSTextView`, so they bypass Apple's entire writing stack. TypeFlow is a small floating composer that gives you the full Apple text experience, then hands your prompt to **Warp's Rich Input** editor — which pastes and submits it into the focused `claude` session natively. No copy/paste. No clipboard hijack (the pasteboard is saved and restored).
 
 > [!NOTE]
-> **v0.1** — works end-to-end on macOS 26 (Tahoe). Claude Code + Warp only for now. [Roadmap below](#roadmap).
+> **v0.1** — works end-to-end on macOS 26 (Tahoe). Sending works with Claude Code in Warp only for now; the [selection shortcuts](#beyond-claude-code) work in any app. [Roadmap below](#roadmap).
 
 ## Features
 
@@ -120,7 +120,7 @@ The footer shows where ↵ goes (Warp → the focused tab), the draft's language
 flowchart TD
     A["⌥Space<br/>floating composer"] --> B["Apple text stack<br/>autocorrect · completion · dictation"]
     B --> C{"⌘K?"}
-    C -- "check" --> D["English coach<br/>your own claude / codex CLI"]
+    C -- "check" --> D["English coach<br/>your own claude, codex<br/>or agy CLI"]
     D --> E["Corrected draft<br/>score · changes · why"]
     E --> F["Send ↵"]
     C -- "as typed" --> F
