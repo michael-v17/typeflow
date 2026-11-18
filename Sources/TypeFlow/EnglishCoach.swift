@@ -645,14 +645,20 @@ final class EnglishCoach {
     private static func workDir() throws -> URL {
         let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                appropriateFor: nil, create: true)
+        if wroteFiles { return base.appendingPathComponent("TypeFlow/coach", isDirectory: true) }
+        let dir = try writeCoachFiles(under: base)
+        wroteFiles = true
+        return dir
+    }
+
+    /// Creates `<base>/TypeFlow/coach` (and any missing parent) and writes the
+    /// bundled prompts and schemas into it — a first launch has no folder at all.
+    static func writeCoachFiles(under base: URL) throws -> URL {
         let dir = base.appendingPathComponent("TypeFlow/coach", isDirectory: true)
-        if !wroteFiles {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            for mode in [Mode.check, Mode.reply] {
-                try mode.instructions.write(to: dir.appendingPathComponent(mode.rulesFile), atomically: true, encoding: .utf8)
-                try mode.schema.write(to: dir.appendingPathComponent(mode.schemaFile), atomically: true, encoding: .utf8)
-            }
-            wroteFiles = true
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for mode in [Mode.check, Mode.reply] {
+            try mode.instructions.write(to: dir.appendingPathComponent(mode.rulesFile), atomically: true, encoding: .utf8)
+            try mode.schema.write(to: dir.appendingPathComponent(mode.schemaFile), atomically: true, encoding: .utf8)
         }
         return dir
     }
@@ -710,11 +716,12 @@ final class EnglishCoach {
         
         - intent: one short line with what the writer means. If a phrase is unclear, infer the most likely meaning from the rest of the text and state it here.
         - native: what a native American English speaker would naturally write to express that intent, in the same tone (casual stays casual), keeping every idea and technical detail. Rephrase freely: restructure sentences and replace awkward or Spanish-shaped phrases with idiomatic ones, even when they are grammatical. Never add or drop an idea, never flip a negative. Leave parts that are already natural untouched.
+        - Single-word false friends (check EVERY word, including the first one; this writer makes these often): an English word used with the meaning of the Spanish word it looks like is a mistake even when the sentence is grammatical. actually = actualmente (currently, right now); eventually = eventualmente (possibly, sometimes); assist = asistir (attend); realize = realizar (carry out, do); pretend = pretender (intend, try to); sensible = sensible (sensitive); discuss = discutir (argue); advise = avisar (let know); support = soportar (put up with); library = librería (bookstore); compromise = compromiso (commitment). Test: does the Spanish meaning fit the sentence? "Actually" that describes how things are now (an ongoing state, "since …", "these days") and doesn't contradict something said before means actualmente: it is wrong, and native says "Right now" or "Currently" instead. Example: "Actually the build is broken since Monday" → native "Right now the build has been broken since Monday", with a fix original "Actually", correction "Right now", reason "actualmente = currently", category "false-friends-and-calques". Give each false friend its own fix like that: original = only that word, reason naming the Spanish word.
         - Mostly Spanish (MORE THAN HALF of the words are Spanish): native is the natural US English translation; score = null; fixes = []. Anything else is English and gets a score, even with a few Spanish words in it.
         - Mostly English with some Spanish words or phrases: score the English part as usual and give its mistakes their own fixes. Translate each Spanish span in place inside native, with one fix per span: original = only the Spanish words, reason "Spanish → English", category "l1-switch".
         - native is ALWAYS English.
         - score 0-100 (minor -1..-5: punctuation, slightly unnatural wording; medium -6..-15: tense, awkward structure, Spanish-style structure; major -16..-40: broken grammar or unclear intent).
-        - fixes: one per change between the text and native, each at the smallest span: a word or a short phrase, NEVER a whole sentence or clause. When native restructures a sentence, list the separate changes that matter most (up to 5), each with its own short original. original must be copied verbatim from the text and differ from correction. reason: 2-5 words. category: the closest slug ("l1-switch" for Spanish translated in place; "false-friends-and-calques" for an English phrase built like Spanish; "unclassified" if none fits).
+        - fixes: one per change between the text and native, each at the smallest span: a word or a short phrase, NEVER a whole sentence or clause. When native restructures a sentence, list the separate changes that matter most (up to 5), each with its own short original. original must be copied verbatim from the text and differ from correction. reason: 2-5 words. category: the closest slug ("l1-switch" for Spanish translated in place; "false-friends-and-calques" for a single-word false friend or an English phrase built like Spanish; "unclassified" if none fits).
         - why: 1-2 sentences on the most important rule or native intuition. Do not repeat the pattern.
         - pattern: one short reusable rule or phrase.
         - spanish_transfer: the Spanish structure that carried over, or "".
@@ -752,9 +759,10 @@ final class EnglishCoach {
         - asked: each question or request the message actually puts to the writer (a question, or an explicit ask such as "let me know", "can you", "should I"), in order, at most 5 ([] if none). Never turn a statement or a plan into a question. question: the message's own words, shortened to at most 12 words. kind: "yes-no" (answerable with yes or no), "choice" (pick between options), "open" (what, how, why, when), or "request" (asks the writer to do, confirm, or decide something). answered: true if the draft's idea answers it, in any language and however roughly ("si" answers a yes-no question). note: if not answered, 3-8 words on what to add; else "".
         - intent: one short line with what the writer wants to say back.
         - native: the reply a native American English speaker would send, built from the draft's ideas. Answer the way it was asked: a yes-no question gets yes or no (or "not yet") first, then the condition or reason; a choice names the option first; an open question leads with the direct answer; follow the message's order. Match the message's register and keep it as short as a chat reply. Keep every idea and technical detail from the draft. NEVER invent a decision, fact, opinion, or commitment the draft doesn't express: if a question isn't covered by the draft, leave it out of native and mark it answered = false.
+        - Single-word false friends (check EVERY word, including the first one; this writer makes these often): an English word used with the meaning of the Spanish word it looks like is a mistake even when the sentence is grammatical. actually = actualmente (currently, right now); eventually = eventualmente (possibly, sometimes); assist = asistir (attend); realize = realizar (carry out, do); pretend = pretender (intend, try to); sensible = sensible (sensitive); discuss = discutir (argue); advise = avisar (let know); support = soportar (put up with); library = librería (bookstore); compromise = compromiso (commitment). Test: does the Spanish meaning fit the sentence? "Actually" that describes how things are now (an ongoing state, "since …", "these days") and doesn't contradict something said before means actualmente: it is wrong, and native says "Right now" or "Currently" instead. Example: "Actually the build is broken since Monday" → native "Right now the build has been broken since Monday", with a fix original "Actually", correction "Right now", reason "actualmente = currently", category "false-friends-and-calques". Give each false friend its own fix like that: original = only that word, reason naming the Spanish word.
         - native is ALWAYS English.
         - score: the English of the draft, 0-100 (minor -1..-5: punctuation, slightly unnatural wording; medium -6..-15: tense, awkward structure, Spanish-style structure; major -16..-40: broken grammar or unclear intent). Notes-style drafts are graded on their English, not on being short. Mostly Spanish (MORE THAN HALF of the words are Spanish): score = null; fixes = [].
-        - fixes: language mistakes only, in the draft's own words: one per change at the smallest span, a word or a short phrase, NEVER a whole sentence or clause, up to 5. Words native adds to answer the message, or reorders to lead with the answer, are NOT fixes. original must be copied verbatim from the draft and differ from correction. reason: 2-5 words. category: the closest slug ("l1-switch" for a Spanish span inside an English draft, reason "Spanish → English"; "false-friends-and-calques" for an English phrase built like Spanish; "unclassified" if none fits).
+        - fixes: language mistakes only, in the draft's own words: one per change at the smallest span, a word or a short phrase, NEVER a whole sentence or clause, up to 5. Words native adds to answer the message, or reorders to lead with the answer, are NOT fixes. original must be copied verbatim from the draft and differ from correction. reason: 2-5 words. category: the closest slug ("l1-switch" for a Spanish span inside an English draft, reason "Spanish → English"; "false-friends-and-calques" for a single-word false friend or an English phrase built like Spanish; "unclassified" if none fits).
         - why: 1-2 sentences on the most important thing about answering this message well: how it was asked and how native leads, or a key phrasing point. Do not repeat the pattern.
         - pattern: one short reusable rule, e.g. "Yes-no question: lead with yes or no, then the condition."
         - spanish_transfer: the Spanish structure that carried over, or "".
