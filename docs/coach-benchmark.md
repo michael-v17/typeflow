@@ -3,6 +3,12 @@
 Which model should run the ⌘K English coach? Measured 2026-10-07, the day Claude Haiku 5.5 shipped.
 Rerun when a new model ships or a provider changes its CLI.
 
+> [!NOTE]
+> The drafts are withheld: the inputs (`sentences.json`, `translate.json`) and the raw outputs
+> (`results-*.json`) hold real practice text, so they aren't in this repo, and the draft fragments
+> quoted below are paraphrased. To rerun, put your own drafts in `scripts/coach-bench/sentences.json`
+> (and `translate.json` for `--set translate`) as a JSON array of strings.
+
 **Decision: keep `gpt-6-luna` (Codex, ChatGPT plan) as the default and `gpt-6-sol` as ⌘K-again.**
 No Apple provider. **Update 2026-10-08:** a Claude fallback was added for when the Codex budget
 runs low — the composer's `⌘K` picker → a Claude account (or Antigravity · Gemini 3.8 Flash, spot-checked: 10–25 s, same miss on the broken question). The owner picked Haiku 5.5 at medium for the quick
@@ -116,5 +122,3 @@ An earlier solo pair of runs (same day) took 3.4–5.1 s — launch-day load may
 - `claude -p` was available in Claude Code 2.1.293 with subscription auth.
 - Picking one of the two Claude accounts = set `CLAUDE_CONFIG_DIR` for the subprocess.
 - Judge the outputs, not the self-reported `score` — Apple's 92 average was the worst quality.
-
-> Note: the benchmark fixtures (`sentences.json`, `results-*.json`) contain personal practice text and are kept local, not published.
