@@ -82,4 +82,23 @@ final class ComposerTypingTests: XCTestCase {
         type("dont ", into: window)
         XCTAssertEqual(window.textView.string, "Don't ")
     }
+
+    func testMixedSpanishDraftStillFixesContractions() {
+        _ = NSApplication.shared
+        let window = ComposerWindow { _ in true }
+        window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        window.makeFirstResponder(window.textView)
+
+        for draft in ["bueno pero dont ", "creo que im ", "creo que el test doesnt "] {
+            XCTAssertEqual(DraftLanguage.detect(draft), .spanish, draft) // the case that used to skip
+            window.textView.string = ""
+            type(draft, into: window)
+            XCTAssertTrue(["don't", "I'm", "doesn't"].contains { window.textView.string.contains($0) },
+                          window.textView.string)
+        }
+        // The real words stay as typed in Spanish drafts too.
+        window.textView.string = ""
+        type("creo que wont ", into: window)
+        XCTAssertEqual(window.textView.string, "Creo que wont ")
+    }
 }

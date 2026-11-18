@@ -1069,8 +1069,11 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// When the user just typed a word boundary (space/punctuation) right after
     /// a known apostrophe-less contraction, replace it with the apostrophe form
     /// (e.g. "dont " → "don't "). One edit, fully undoable; caret preserved.
+    /// Runs in Spanish drafts too: none of the words is Spanish, and a mixed draft
+    /// is often detected as Spanish ("bueno pero dont " was left as typed, then the
+    /// grammar panel flagged it once the draft read as English).
     private func autocorrectContraction() {
-        guard !isCorrecting, draftLanguage == .english else { return }
+        guard !isCorrecting else { return }
         let ns = textView.string as NSString
         let sel = textView.selectedRange()
         let caret = sel.location
