@@ -231,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // specific tty — the footer label is a read-only indicator of that tab.
         // (Full session-aware tab focusing is a future AX-traversal task.)
         do {
-            try WarpInjector.send(send.text, marker: send.marker)
+            try WarpInjector.send(send.payload())
             WingmanEnglishLog.record(send)
             return true
         } catch let error as WarpInjector.InjectError {

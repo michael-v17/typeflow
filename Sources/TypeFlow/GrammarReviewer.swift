@@ -66,6 +66,9 @@ final class GrammarReviewer {
         single word or a short 2-4 word phrase. NEVER return a whole sentence or \
         clause as one fix. If a sentence has several problems, return a SEPARATE \
         fix for each one, each with its own tiny 'original'.
+        - Never make a noun singular or plural unless the sentence itself forces \
+        it ("two test" -> "two tests", "a tests" -> "a test"). "the tests" is \
+        correct as written.
         - If the text is already correct and natural, return an empty list.
 
         EXAMPLE
@@ -121,7 +124,9 @@ final class GrammarReviewer {
                     to: text, generating: GrammarReview.self,
                     options: GenerationOptions(temperature: 0.1))
                 guard !Task.isCancelled else { return }
-                let located = Self.locate(response.content.fixes, in: text)
+                let located = Self.locate(response.content.fixes.map {
+                    Fix(original: $0.original, correction: $0.correction, reason: $0.reason)
+                }, in: text)
                 if Self.debug {
                     fputs("TypeFlow: review OK raw=\(response.content.fixes.count) located=\(located.count)\n", stderr)
                     for f in response.content.fixes {
@@ -141,11 +146,21 @@ final class GrammarReviewer {
         task = nil
     }
 
+    /// A model fix before it's located in the text.
+    struct Fix {
+        let original: String
+        let correction: String
+        let reason: String
+    }
+
     /// Map each fix's `original` to an absolute range in `text`, scanning left to
     /// right so repeated words map in order. Skips fixes that: are no-ops, whose
-    /// `original` isn't a verbatim substring (hallucinated span), or that would
-    /// delete a negation — the worst kind of meaning flip ("not" → "is").
-    private static func locate(_ fixes: [GrammarFix], in text: String) -> [GrammarSpan] {
+    /// `original` isn't in the text as whole words (a hallucinated span, or a
+    /// partial word like "retur" that would otherwise match inside the finished
+    /// "return"), that would delete a negation — the worst kind of meaning flip
+    /// ("not" → "is") — or that only make a noun singular ("tests" → "test"),
+    /// which changes what the writer said.
+    static func locate(_ fixes: [Fix], in text: String) -> [GrammarSpan] {
         let ns = text as NSString
         var spans: [GrammarSpan] = []
         var cursor = 0
@@ -154,15 +169,61 @@ final class GrammarReviewer {
                   fix.correction.caseInsensitiveCompare(fix.original) != .orderedSame,
                   !isCoarse(fix.original),
                   !dropsNegation(from: fix.original, to: fix.correction) else { continue }
-            let scope = NSRange(location: cursor, length: ns.length - cursor)
-            var r = ns.range(of: fix.original, options: [], range: scope)
-            if r.location == NSNotFound { r = ns.range(of: fix.original) }
-            guard r.location != NSNotFound else { continue }
+            guard let r = wholeWordRange(of: fix.original, in: ns, from: cursor)
+                    ?? wholeWordRange(of: fix.original, in: ns, from: 0) else { continue }
+            if dropsPlural(fix, at: r, in: ns) { continue }
             spans.append(GrammarSpan(range: r, original: fix.original,
                                      correction: fix.correction, reason: fix.reason))
             cursor = r.location + r.length
         }
         return spans
+    }
+
+    /// The first occurrence of `needle` at or after `from` that isn't part of a
+    /// longer word — no letter or digit right before or after it.
+    private static func wholeWordRange(of needle: String, in text: NSString, from: Int) -> NSRange? {
+        var start = from
+        while start <= text.length {
+            let r = text.range(of: needle, options: [], range: NSRange(location: start, length: text.length - start))
+            guard r.location != NSNotFound else { return nil }
+            if !isWordChar(text, r.location - 1), !isWordChar(text, NSMaxRange(r)) { return r }
+            start = r.location + 1
+        }
+        return nil
+    }
+
+    private static func isWordChar(_ text: NSString, _ i: Int) -> Bool {
+        guard i >= 0, i < text.length, let s = Unicode.Scalar(text.character(at: i)) else { return false }
+        return CharacterSet.alphanumerics.contains(s)
+    }
+
+    /// Words a learner pluralizes by mistake ("informations"): making these
+    /// singular is a real fix.
+    private static let uncountable: Set<String> = [
+        "information", "advice", "feedback", "software", "hardware", "equipment",
+        "furniture", "research", "homework", "knowledge", "evidence", "luggage",
+        "baggage", "code", "data", "stuff", "staff", "progress", "news",
+    ]
+    /// A word right before the noun that makes it singular ("a tests" → "a test").
+    private static let singularCue: Set<String> = [
+        "a", "an", "one", "this", "that", "each", "every", "another", "single",
+    ]
+
+    /// True when the fix only drops a plural ending from one word ("tests" →
+    /// "test", "boxes" → "box") and nothing in the sentence asks for the singular.
+    private static func dropsPlural(_ fix: Fix, at range: NSRange, in text: NSString) -> Bool {
+        let o = fix.original.lowercased(), c = fix.correction.lowercased()
+        guard !o.contains(" "), !c.contains(" "),
+              o == c + "s" || o == c + "es" || (o.hasSuffix("ies") && c.hasSuffix("y") && o.dropLast(3) == c.dropLast(1))
+        else { return false }
+        if uncountable.contains(c) { return false }
+        // The word before the noun.
+        var end = range.location
+        while end > 0, !isWordChar(text, end - 1) { end -= 1 }
+        var start = end
+        while start > 0, isWordChar(text, start - 1) { start -= 1 }
+        let previous = text.substring(with: NSRange(location: start, length: end - start)).lowercased()
+        return !singularCue.contains(previous)
     }
 
     /// True when a fix's `original` spans too much text to be a "separated"
