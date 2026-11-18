@@ -68,6 +68,13 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     /// copied or swapped for another session's.
     private var languageLocked = false
     private let hintLabel = NSTextField(labelWithString: ComposerWindow.defaultHint)
+    /// Shown with "Couldn't open Warp's input — text kept" after a send that
+    /// stopped before pasting: copies the text that was going to be sent.
+    private let sendFailCopyButton = NSButton()
+    private var sendFailCopyWidth: NSLayoutConstraint!
+    private var sendFailCopyGap: NSLayoutConstraint!
+    /// The text of the send that failed, while its message is up.
+    private var failedSendText: String?
     /// Header ⋯: keep open, all desktops, Warp/Copy and the full shortcut list.
     private let moreButton = NSButton()
     /// Picks who runs ⌘K: a Codex model (Luna or Terra), a Claude account + model, or Antigravity.
@@ -446,6 +453,17 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         // The session name gives way first, then the hint; the tool icons never do.
         hintLabel.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
 
+        sendFailCopyButton.translatesAutoresizingMaskIntoConstraints = false
+        sendFailCopyButton.title = "Copy"
+        sendFailCopyButton.bezelStyle = .accessoryBarAction
+        sendFailCopyButton.controlSize = .small
+        sendFailCopyButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        sendFailCopyButton.toolTip = "Copy the text to the clipboard"
+        sendFailCopyButton.target = self
+        sendFailCopyButton.action = #selector(copyFailedSend)
+        sendFailCopyButton.isHidden = true
+        sendFailCopyButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         moreButton.translatesAutoresizingMaskIntoConstraints = false
         moreButton.isBordered = false
         moreButton.bezelStyle = .accessoryBarAction
@@ -529,6 +547,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         footer.addSubview(modeButton)
         footer.addSubview(sessionLabel)
         footer.addSubview(hintLabel)
+        footer.addSubview(sendFailCopyButton)
         footer.addSubview(dictateButton)
         footer.addSubview(langButton)
         footer.addSubview(speakButton)
@@ -650,9 +669,14 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             dictateButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             dictateButton.widthAnchor.constraint(equalToConstant: 16),
             dictateButton.heightAnchor.constraint(equalToConstant: 16),
-            hintLabel.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             hintLabel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            sendFailCopyButton.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            sendFailCopyButton.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
         ])
+        // Collapsed (zero width, no gap) unless a failed send is showing.
+        sendFailCopyGap = hintLabel.trailingAnchor.constraint(equalTo: sendFailCopyButton.leadingAnchor)
+        sendFailCopyWidth = sendFailCopyButton.widthAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([sendFailCopyGap, sendFailCopyWidth])
 
         grammarPanelHeight = grammarPanel.heightAnchor.constraint(equalToConstant: 0)
         grammarPanelHeight.isActive = true
@@ -854,6 +878,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
     }
 
     func clear() {
+        hideSendFailure()
         if selection != nil { return endSelection() } // the session's own draft is untouched
         textView.string = ""
         fitTextHeight()
@@ -898,6 +923,7 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
             refreshCoachMarks()
             hintLabel.stringValue = coachHint
         }
+        hideSendFailure() // the kept text is being worked on again
         refreshDraftLanguage()
         autocorrectContraction()
         capitalizeSentenceStart()
@@ -1939,6 +1965,47 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
         } else {
             hide()
         }
+    }
+
+    /// A send stopped before anything was pasted (Warp's Rich Input didn't open):
+    /// the draft stays, the footer says so, and Copy offers the text. Warp has
+    /// focus after ⌃G, so the composer comes back to the front.
+    func showSendFailure(_ text: String, activate: Bool = true) {
+        failedSendText = text
+        hintLabel.stringValue = WarpInjector.InjectError.richInputMessage
+        hintLabel.textColor = .systemRed
+        sendFailCopyButton.isHidden = false
+        sendFailCopyWidth.isActive = false
+        sendFailCopyGap.constant = -6
+        guard activate else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+        makeFirstResponder(textView)
+    }
+
+    /// The footer's failure state, for tests.
+    var sendFailureShown: (message: String, copyVisible: Bool)? {
+        failedSendText == nil ? nil : (hintLabel.stringValue, !sendFailCopyButton.isHidden)
+    }
+
+    private func hideSendFailure() {
+        guard failedSendText != nil else { return }
+        failedSendText = nil
+        sendFailCopyButton.isHidden = true
+        sendFailCopyWidth.isActive = true
+        sendFailCopyGap.constant = 0
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.stringValue = coachHint
+    }
+
+    @objc private func copyFailedSend() {
+        guard let text = failedSendText else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        hideSendFailure()
+        makeFirstResponder(textView)
+        flashHint("✓ Copied — paste it anywhere with ⌘V")
     }
 
     /// Briefly replace the footer hint with a confirmation, then restore it.

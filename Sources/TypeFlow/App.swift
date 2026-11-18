@@ -234,6 +234,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try WarpInjector.send(send.payload())
             WingmanEnglishLog.record(send)
             return true
+        } catch WarpInjector.InjectError.richInputNotOpened {
+            // Nothing was typed into Warp. No alert: the composer keeps the text
+            // and says so in its footer, with a Copy button.
+            NSSound.beep()
+            fputs("TypeFlow: \(WarpInjector.InjectError.richInputMessage)\n", stderr)
+            composer.showSendFailure(send.text)
+            return false
         } catch let error as WarpInjector.InjectError {
             NSSound.beep()
             fputs("TypeFlow: \(error)\n", stderr)

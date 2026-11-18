@@ -11,7 +11,10 @@ import Carbon.HIToolbox
 ///   1. Activate Warp.
 ///   2. ⌃G to open Rich Input (posted to Warp's pid so global hotkeys can't steal it). (⌃G *toggles* Rich Input in Warp; because we
 ///      close it again after every submit, it's reliably closed when we get
-///      here, so this press reliably opens it.)
+///      here, so this press reliably opens it.) Then CONFIRM it opened
+///      (`RichInputCheck`): in a tab where Warp hasn't recognized claude yet, ⌃G
+///      reaches claude and opens its editor (vim). Unconfirmed → stop: no paste,
+///      no ↵, no second ⌃G, pasteboard untouched; the composer keeps the text.
 ///   3. Put text on the pasteboard.
 ///   4. ⌘V to paste.
 ///   5. ↵ to submit (when `autoSubmit` is true).
@@ -27,6 +30,11 @@ enum WarpInjector {
         case noAccessibilityPermission
         case warpNotRunning
         case warpNotFrontmost
+        /// ⌃G didn't open Rich Input; nothing else was typed.
+        case richInputNotOpened
+
+        /// Shown in the composer's footer (not an alert) for `richInputNotOpened`.
+        static let richInputMessage = "Couldn't open Warp's input — text kept"
 
         var description: String {
             switch self {
@@ -37,6 +45,8 @@ enum WarpInjector {
                 return "Warp doesn't appear to be running."
             case .warpNotFrontmost:
                 return "Warp didn't come to the front, so nothing was sent. Your draft is still here — try again."
+            case .richInputNotOpened:
+                return Self.richInputMessage
             }
         }
     }
@@ -59,6 +69,8 @@ enum WarpInjector {
     private static let activationTimeout: TimeInterval = 1.0
     private static let debug = ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1"
     private static let postRichInputMicros: UInt32 = 150_000 // 150ms — opening RI takes a beat
+    /// How long to wait for Rich Input to show up after ⌃G before giving up.
+    private static let richInputTimeout: TimeInterval = 0.8
     private static let postPasteMicros: UInt32 = 80_000     // 80ms
     private static let postSubmitMicros: UInt32 = 80_000    // 80ms before restoring pasteboard
 
@@ -98,15 +110,19 @@ enum WarpInjector {
         usleep(postActivateMicros)
         log("send: Warp frontmost, injecting \(text.count) chars")
 
-        // 2. Stash and replace pasteboard.
+        // 2. ⌃G — open Rich Input, and confirm it opened before typing anything else.
+        let before = RichInputCheck.snapshot(of: warp)
+        sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl, to: warp)
+        let check = RichInputCheck.waitUntilOpened(warp, from: before, timeout: richInputTimeout)
+        log("send: rich input \(check.opened ? "opened" : "NOT opened") before=\(before) after=\(check.last)")
+        guard check.opened else { throw InjectError.richInputNotOpened }
+        usleep(postRichInputMicros)
+
+        // 3. Stash and replace pasteboard.
         let pb = NSPasteboard.general
         let savedString = pb.string(forType: .string)
         pb.clearContents()
         pb.setString(text, forType: .string)
-
-        // 3. ⌃G — open Rich Input.
-        sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl, to: warp)
-        usleep(postRichInputMicros)
 
         // 4. ⌘V — paste.
         sendKey(keyCode: UInt16(kVK_ANSI_V), modifiers: .maskCommand, to: warp)
