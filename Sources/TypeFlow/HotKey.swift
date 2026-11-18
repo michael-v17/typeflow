@@ -20,6 +20,10 @@ final class HotKey {
         register(keyCode: keyCode, modifiers: modifiers)
     }
 
+    convenience init(_ shortcut: AnyAppShortcut, onFire: @escaping () -> Void) {
+        self.init(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers, onFire: onFire)
+    }
+
     deinit {
         if let ref { UnregisterEventHotKey(ref) }
         if let handlerRef { RemoveEventHandler(handlerRef) }
@@ -48,6 +52,34 @@ final class HotKey {
         let status = RegisterEventHotKey(keyCode, modifiers, hkID, GetApplicationEventTarget(), 0, &ref)
         // Usually another app already owns the combination.
         if status != noErr { fputs("TypeFlow: hotkey \(keyCode)/\(modifiers) not registered (\(status))\n", stderr) }
+    }
+}
+
+/// The hotkeys that work on text selected (or copied) in any app. The app
+/// registers them from this table and the menu bar menu lists them from it, so a
+/// key and its label can't drift apart.
+enum AnyAppShortcut: CaseIterable {
+    case correct, quickFix, translate, readAloud
+
+    var keyCode: UInt32 {
+        switch self {
+        case .correct: return UInt32(kVK_ANSI_E)
+        case .quickFix: return UInt32(kVK_ANSI_K)
+        case .translate: return UInt32(kVK_ANSI_T)
+        case .readAloud: return UInt32(kVK_ANSI_R)
+        }
+    }
+
+    var modifiers: UInt32 { UInt32(cmdKey | optionKey) }
+
+    /// Its line in the menu bar menu.
+    var menuLine: String {
+        switch self {
+        case .correct: return "   ⌥⌘E  correct in the composer"
+        case .quickFix: return "   ⌥⌘K  quick fix in place"
+        case .translate: return "   ⌥ ⌥ or ⌥⌘T  translate"
+        case .readAloud: return "   ⌥⌘R  read aloud"
+        }
     }
 }
 

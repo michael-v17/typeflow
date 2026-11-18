@@ -17,6 +17,8 @@ Autocorrect · inline completion · grammar · dictation — right where you tal
 
 <img src="assets/hero.png" alt="TypeFlow's English coach correcting a prompt before it goes to Claude Code" />
 
+<sub>⌘K on a prompt before it goes to Claude Code: a score, the corrected version, and why.</sub>
+
 </div>
 
 ---
@@ -29,28 +31,44 @@ Terminal emulators don't use `NSTextView`, so they bypass Apple's entire writing
 ## Features
 
 - **Apple text intelligence in the composer** — autocorrect, continuous spellcheck, grammar, text replacement, Writing Tools. Smart quotes/dashes are **off** on purpose so `"strings"` and `--flags` in your prompts aren't mangled.
+- **Contraction autocorrect** — fixed as you type, on a word boundary, in any draft language: `dont`, `doesnt`, `didnt`, `isnt`, `wasnt`, `arent`, `werent`, `havent`, `hasnt`, `couldnt`, `wouldnt`, `shouldnt`, `im`, `ive` (plus a lone `i` → `I`). `cant`, `wont`, `ill`, `id`, `its`, `were`, `well`, `hell` and `shell` are real words, so they're never auto-fixed: the right form depends on the sentence, and the spell checker and the suggestions panel can still point them out.
+- **Sentence starts capitalized** — `give me` → `Give me`, `done. it works` → `done. It works`, and `i'm` / `i've` / `i'll` / `i'd` → `I'm`…, once the word is typed. Only a plain lowercase word, so `--force`, `readme.md` or `iOS` stay as typed; not after `e.g.`, `etc.`, `...` or `:`; ⌘Z undoes it.
+- **Apple dictation** — a mic button (or your system dictation shortcut) dictates straight into the composer.
+- **Straight into Claude Code** — ↵ hands the prompt to Warp's Rich Input in the focused tab, which submits it to `claude`. Nothing is pasted until Warp confirms Rich Input opened. If it doesn't open, nothing is typed anywhere: the composer keeps the text and shows **"Couldn't open Warp's input — text kept"** with a **Copy** button.
+- **Keep-open mode** (default on) — Enter sends but leaves the composer open for rapid multi-send.
+- **Multi-session aware** — the composer **follows the focused Warp tab** and keeps a **separate draft per `claude` session**, so switching tabs never loses what you typed.
+
+![A prompt sent from the composer into Claude Code in the focused Warp tab](assets/sent.png)
+
+<p align="center"><sub>The composer under Warp: ↵ put the prompt into the focused <code>claude</code> session.</sub></p>
+
 - **Inline word completion** — finishes the word you're typing (`becom` → `become`) as gray ghost text via the system dictionary: instant, local, English or Spanish detected per draft. **Tab** accepts.
 - **On-device suggestions** — while you pause on an English draft, Apple's on-device model (Foundation Models) lists grammar and word-form fixes under the text, each with **Fix** (or **Fix all**). Nothing is applied until you click. Fixes land on whole words only, and a plural noun isn't made singular unless the sentence calls for it.
 
-![The composer completing a word in gray, with two on-device suggestions under the draft](assets/completion.png)
+![The composer completing a word in gray, with the on-device suggestions panel under the draft](assets/completion.png)
 
-- **Contraction autocorrect** — fixed as you type, on a word boundary, in any draft language: `dont`, `doesnt`, `didnt`, `isnt`, `wasnt`, `arent`, `werent`, `havent`, `hasnt`, `couldnt`, `wouldnt`, `shouldnt`, `im`, `ive` (plus a lone `i` → `I`). `cant`, `wont`, `ill`, `id`, `its`, `were`, `well`, `hell` and `shell` are real words, so they're never auto-fixed: the right form depends on the sentence, and the spell checker and the suggestions panel can still point them out.
-- **Sentence starts capitalized** — `give me` → `Give me`, `done. it works` → `done. It works`, and `i'm` / `i've` / `i'll` / `i'd` → `I'm`…, once the word is typed. Only a plain lowercase word, so `--force`, `readme.md` or `iOS` stay as typed; not after `e.g.`, `etc.`, `...` or `:`; ⌘Z undoes it.
+<p align="center"><sub>Inline completion in gray, and the on-device suggestions panel under the draft.</sub></p>
+
 - **⌘K English coach** — checks the draft before you send: a score, grammar and usage fixes with a one-click corrected version (tracked as editable colored changes), and why each mistake happened, including when it comes from Spanish. It also catches single-word Spanish false friends used with their Spanish meaning (actually = actualmente, eventually = eventualmente, assist = asistir, …). Runs through **your own** `codex`, `claude` or `agy` CLI; which model runs it by default was [measured](docs/coach-benchmark.md). Optional — everything else works without it.
 - **Reply mode** — attach the message you're answering (⌘⇧V or **Reply to copied message**; a copied screenshot works too), write your own idea in English or Spanish, and ⌘K suggests a reply that answers what was asked, the way it was asked.
-- **Straight into Claude Code** — ↵ hands the prompt to Warp's Rich Input in the focused tab, which submits it to `claude`. Nothing is pasted until Warp confirms Rich Input opened. If it doesn't open, nothing is typed anywhere: the composer keeps the text and shows **"Couldn't open Warp's input — text kept"** with a **Copy** button.
 
-![The corrected prompt from the hero, sent into Claude Code in Warp](assets/sent.png)
+### Beyond Claude Code
 
-- **Apple dictation** — a mic button (or your system dictation shortcut) dictates straight into the composer.
-- **Keep-open mode** (default on) — Enter sends but leaves the composer open for rapid multi-send.
-- **Multi-session aware** — the composer **follows the focused Warp tab** and keeps a **separate draft per `claude` session**, so switching tabs never loses what you typed.
+Select text in any app (or copy it, where the app won't share its selection, like Warp), then:
+
+- **Right-click → Correct with TypeFlow** or **Translate with TypeFlow**, in apps that support macOS Services.
+- **⌥⌘E** — correct it in the composer with the ⌘K check; ↵ copies the result. By default the selection is cut first, so ⌘V puts the correction in its place (a ⋯ setting).
+- **⌥⌘K** — quick fix: only the corrected text, pasted over the selection.
+- **⌥⌘T** — translate English ↔ Spanish in a small card under the selection, with ▶ and **Copy**.
+- **⌥⌘R** — read it aloud in a small player.
+
+The shortcuts cover apps without Services, like Warp and most Electron apps. Translation (Apple's Translation framework) and the voices run on-device: free, and offline once English and Spanish are downloaded (System Settings → General → Language & Region → Translation Languages).
 
 ## Requirements
 
 - **macOS 26 (Tahoe) or newer.** The build links Apple's `FoundationModels` framework (the on-device model behind the suggestions), which pins the deployment target to macOS 26.
 - [Warp](https://warp.dev), with `claude` running in at least one tab.
-- **Accessibility permission** (required) — to send keystrokes into Warp's Rich Input and read which tab is focused. Granted on first launch.
+- **Accessibility permission** (required) — to send keystrokes into Warp's Rich Input, read which tab is focused, and read a selection in another app. Granted on first launch.
 - **Microphone permission** (optional) — only if you use dictation.
 - Swift toolchain from current Xcode / Command Line Tools.
 
@@ -67,11 +85,10 @@ cd typeflow
 #    the first build's codesign prompt)
 ./scripts/make-cert.sh
 
-# 2. build the icon + the signed .app, then install it
+# 2. build the icon, then the signed .app: make-app.sh installs it to
+#    /Applications and opens it (--no-install builds only the local bundle)
 ./scripts/make-icon.sh
 ./scripts/make-app.sh release
-cp -R TypeFlow.app /Applications/
-open /Applications/TypeFlow.app
 ```
 
 On first launch, grant **Accessibility** (System Settings → Privacy & Security → Accessibility → TypeFlow), and **Microphone** the first time you dictate. To launch automatically, add `/Applications/TypeFlow.app` to **System Settings → General → Login Items**.
@@ -95,12 +112,12 @@ On first launch, grant **Accessibility** (System Settings → Privacy & Security
 | Close the panel, then the composer | **⎋** (Escape) |
 | Dictate | the **🎙** button (or your system dictation shortcut) |
 
-The footer shows where ↵ goes (Warp → the focused tab), the draft's language, read aloud, the mic, and the main keys. The **⋯** menu holds the settings (Keep open after sending, Show on all desktops, Send to Warp, Tag sends for the learning log, …) and the full shortcut list. Sending always targets Warp's **frontmost** tab — switch sessions by clicking the Warp tab and the composer follows it.
+The footer shows where ↵ goes (Warp → the focused tab), the draft's language, read aloud, the mic, and the main keys. The **⋯** menu holds the settings (Keep open after sending, Show on all desktops, Send to Warp, Tag sends for the learning log, …) and the full shortcut list. Sending always targets Warp's **frontmost** tab — switch sessions by clicking the Warp tab and the composer follows it. The shortcuts that work in any app are under [Beyond Claude Code](#beyond-claude-code).
 
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["⌥Space<br/>floating composer"] --> B["Apple text stack<br/>autocorrect · completion · dictation"]
     B --> C{"⌘K?"}
     C -- "check" --> D["English coach<br/>your own claude / codex CLI"]
@@ -140,10 +157,10 @@ Your pasteboard is saved and restored around each send, nothing is pasted until 
 | `RichInputCheck.swift` | Confirms ⌃G opened Rich Input before anything is pasted |
 | `WarpInspector.swift` | Reads Warp's focused-window title for session-following |
 | `ProcessWatcher.swift` | `libproc` detection of `claude` sessions (adaptive polling) |
-| `HotKey.swift` | Carbon ⌥Space registration, and the double-tapped ⌥ ⌥ shortcut |
+| `HotKey.swift` | Carbon hotkeys (⌥Space and the any-app shortcut table), and the double-tapped ⌥ ⌥ |
 | `PTYWriter.swift` | **Legacy** — the old PTY-write path, not used |
 
-Build helpers in `scripts/`: `make-cert.sh` (stable signing identity, once), `make-icon.sh` (renders `Resources/AppIcon.icns`), `make-app.sh` (build + bundle + sign). Unit tests in `Tests/TypeFlowTests`: send tags, contractions, suggestion placement, the coach files, the send failure, `TrackChanges` and `WordCompleter`.
+Build helpers in `scripts/`: `make-cert.sh` (stable signing identity, once), `make-icon.sh` (renders `Resources/AppIcon.icns`), `make-app.sh` (build + bundle + sign). Unit tests in `Tests/TypeFlowTests`: send tags, contractions, suggestion placement, the coach files, the send failure, `TrackChanges`, `WordCompleter`, the any-app shortcuts, the right-click services, translation and read aloud.
 
 </details>
 
@@ -164,7 +181,7 @@ If you spend hours a day writing prose-heavy prompts to Claude Code, doing it in
 
 ## Privacy
 
-TypeFlow makes **no network calls of its own and collects nothing**. The only thing that leaves the composer is the prompt you send, delivered as keystrokes into your own Warp. The ⌘K coach runs your own `codex`, `claude` or `agy` CLI with your logins — TypeFlow ships no API keys and talks to no endpoints. A screenshot pasted for reply mode goes to that same CLI for the check, and is never saved beyond it or logged.
+TypeFlow makes **no network calls of its own and collects nothing**. The only thing that leaves the composer is the prompt you send, delivered as keystrokes into your own Warp. The ⌘K coach runs your own `codex`, `claude` or `agy` CLI with your logins — TypeFlow ships no API keys and talks to no endpoints. A screenshot pasted for reply mode goes to that same CLI for the check, and is never saved beyond it or logged. Translation and read aloud use Apple's on-device frameworks. To read a selection in another app, the any-app shortcuts use Accessibility, or a ⌘C that puts your clipboard back afterwards.
 
 An optional local learning-log integration (for an English-practice corpus) is compiled in but stays **completely inert** unless it's explicitly configured on your machine (the `WingmanEnglishConfig` default or `$WINGMAN_ENGLISH_VAULT`). Its companion setting, **Tag sends for the learning log** (⋯ menu, **off by default**), starts each prompt sent to Warp with a short tag the learning-log hook reads: `;;tf ` sent as written, `;;tf+ ` the coach's version, `;;re ` a reply, `;;v ` dictated. Off, the text reaches Warp exactly as written. Copies (⌘⇧C) never carry a tag.
 

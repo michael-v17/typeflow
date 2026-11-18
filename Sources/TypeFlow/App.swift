@@ -72,17 +72,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         services.onTranslate = { [weak self] text in self?.card.show(translating: text, near: SelectedText.bounds()) }
         NSApp.servicesProvider = services
         NSUpdateDynamicServices()
-        correctKey = HotKey(keyCode: UInt32(kVK_ANSI_E), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+        correctKey = HotKey(.correct) { [weak self] in
             self?.withSelection(cut: SelectedText.cutWhenCorrecting) { self?.composer.correctSelection($0.text) }
         }
         // ⌥⌘K: the correction in place, no composer — for quick chat replies.
-        quickFixKey = HotKey(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+        quickFixKey = HotKey(.quickFix) { [weak self] in
             self?.withSelection { grab in
                 self?.card.show(correcting: grab.text, near: grab.fromClipboard ? nil : SelectedText.bounds(),
                                 replaceIn: grab.app)
             }
         }
-        translateKey = HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+        translateKey = HotKey(.translate) { [weak self] in
             self?.withSelection { self?.translate($0) }
         }
         // ⌥ ⌥: the one-finger way to translate, for frequent use.
@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.withSelection { self?.translate($0) }
         }
         // ⌥⌘R: just hear it, no translation — a small player (ReadAloudPanel); again stops.
-        readKey = HotKey(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+        readKey = HotKey(.readAloud) { [weak self] in
             guard let self else { return }
             if self.reader.isReading { return self.reader.stop() }
             self.withSelection { self.reader.read($0.text, from: $0.app) }
@@ -161,8 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "Open Composer  ⌥Space",
                      action: #selector(toggleComposer),
                      keyEquivalent: "").target = self
-        for line in ["Select or copy text, then:", "   ⌥⌘E  correct in the composer",
-                     "   ⌥⌘K  quick fix in place", "   ⌥ ⌥ or ⌥⌘T  translate", "   ⌥⌘R  read aloud"] {
+        for line in ["Select or copy text, then:"] + AnyAppShortcut.allCases.map(\.menuLine) {
             menu.addItem(withTitle: line, action: nil, keyEquivalent: "").isEnabled = false
         }
         cutItem = menu.addItem(withTitle: "Cut the selection when correcting",

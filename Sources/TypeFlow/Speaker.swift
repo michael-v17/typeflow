@@ -91,7 +91,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         finish()
     }
 
-    private static func bestVoice(for language: DraftLanguage) -> AVSpeechSynthesisVoice? {
+    static func bestVoice(for language: DraftLanguage) -> AVSpeechSynthesisVoice? {
         let prefix = language == .spanish ? "es" : "en"
         // NSSpeechSynthesizer is deprecated, but it's still the only way to read
         // the System voice; if it ever stops resolving, the quality pick takes over.
