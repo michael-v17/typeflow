@@ -116,3 +116,5 @@ An earlier solo pair of runs (same day) took 3.4–5.1 s — launch-day load may
 - `claude -p` was available in Claude Code 2.1.293 with subscription auth.
 - Picking one of the two Claude accounts = set `CLAUDE_CONFIG_DIR` for the subprocess.
 - Judge the outputs, not the self-reported `score` — Apple's 92 average was the worst quality.
+
+> Note: the benchmark fixtures (`sentences.json`, `results-*.json`) contain personal practice text and are kept local, not published.
