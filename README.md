@@ -13,7 +13,7 @@
 
 Autocorrect · inline completion · grammar · dictation — right where you talk to Claude Code.
 
-[Features](#features) · [Install](#install) · [Usage](#usage) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Why this exists](#why-this-exists) · [Privacy](#privacy)
+[Features](#features) · [Measured](#measured) · [Install](#install) · [Usage](#usage) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Why this exists](#why-this-exists) · [Privacy](#privacy)
 
 <img src="assets/hero.png" alt="TypeFlow's English coach correcting a prompt before it goes to Claude Code" />
 
@@ -63,6 +63,24 @@ Select text in any app (or copy it, where the app won't share its selection, lik
 - **⌥⌘R** — read it aloud in a small player.
 
 The shortcuts cover apps without Services, like Warp and most Electron apps. Translation (Apple's Translation framework) and the voices run on-device: free, and offline once English and Spanish are downloaded (System Settings → General → Language & Region → Translation Languages).
+
+## Measured
+
+Which model runs the ⌘K coach was measured, not guessed. Every setup got the same 4 real drafts (two typed with Spanish-shaped phrasing, one broken question, one dictated paragraph), 3 runs each, through the prompt and schema TypeFlow uses, and every output was read. From [docs/coach-benchmark.md](docs/coach-benchmark.md), 2026-10-07:
+
+| Model | Median s | API $/check | Avg score it gave | Every output read |
+|---|---|---|---|---|
+| **Luna** (`gpt-6-luna`, Codex) | **5.7** | 0.0005 | 80 | Best: made the key fixes every run |
+| Sol (`gpt-6-sol`, Codex) | 11.5 | — | 72 | Close to Luna, twice as slow |
+| Haiku 5.5, low effort (`claude`) | 8.2 | ≈ 0.001 | 68 | Worse than Luna at every effort: kept the broken question in 8 of 9 runs |
+| Apple on-device | 10.4 | free | 92 | Disqualified: slang rewrites, changed meaning |
+
+- **Decision:** Luna is the default and Sol the deeper ⌘K-again check; no Apple provider. At this volume cost doesn't decide it; quality does.
+- **The score is each model's own grade of the draft, not a quality measure:** Apple graded highest and wrote the worst corrections.
+- Times come from all setups running at once, which inflates them a little. Luna's cost is from the 2026-10-26 rerun at API list prices; on a ChatGPT or Claude plan a check spends allowance, not money.
+- **2026-10-26:** Terra (`gpt-6.1-terra`, medium) joined as a second Codex option. It keeps the meaning of Spanish drafts better; Luna is still better at English coaching and stays the default (small sample: 5 Spanish drafts, 2 runs each).
+
+The drafts themselves are withheld (they're real practice text); the doc explains how to rerun with your own.
 
 ## Requirements
 
