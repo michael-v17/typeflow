@@ -57,6 +57,23 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>TypeFlow uses the microphone for Apple dictation in the composer.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>TypeFlow uses speech recognition for Apple dictation in the composer.</string>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>        <dict><key>default</key><string>Correct with TypeFlow</string></dict>
+            <key>NSMessage</key>         <string>correctSelection</string>
+            <key>NSPortName</key>        <string>TypeFlow</string>
+            <key>NSSendTypes</key>       <array><string>public.utf8-plain-text</string></array>
+            <key>NSRequiredContext</key> <dict/>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>        <dict><key>default</key><string>Translate with TypeFlow</string></dict>
+            <key>NSMessage</key>         <string>translateSelection</string>
+            <key>NSPortName</key>        <string>TypeFlow</string>
+            <key>NSSendTypes</key>       <array><string>public.utf8-plain-text</string></array>
+            <key>NSRequiredContext</key> <dict/>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
@@ -81,6 +98,9 @@ if [ "$INSTALL" -eq 1 ]; then
     pkill -f 'TypeFlow.app/Contents/MacOS/TypeFlow' 2>/dev/null || true
     rm -rf "$DEST"
     ditto "$APP" "$DEST"
+    # Register its right-click Services (Correct / Translate with TypeFlow) now
+    # instead of at the next login.
+    /System/Library/CoreServices/pbs -update 2>/dev/null || true
     open "$DEST"
     echo "Installed to $DEST and relaunched."
 else

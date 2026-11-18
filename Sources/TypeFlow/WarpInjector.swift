@@ -48,6 +48,10 @@ enum WarpInjector {
         "dev.warp.Warp-Preview",
     ]
 
+    static func isWarp(_ app: NSRunningApplication?) -> Bool {
+        warpBundleIDs.contains(app?.bundleIdentifier ?? "")
+    }
+
     /// Delays tuned to give Warp time to open Rich Input and process the paste.
     private static let postActivateMicros: UInt32 = 60_000  // 60ms, once Warp is confirmed frontmost
     /// Upper bounds for the two waits before any keystroke is synthesized.
@@ -130,7 +134,7 @@ enum WarpInjector {
 
     // MARK: - Helpers
 
-    private static func waitForModifierRelease() {
+    static func waitForModifierRelease() {
         let held: CGEventFlags = [.maskAlternate, .maskCommand, .maskControl, .maskShift]
         let deadline = Date().addingTimeInterval(modifierReleaseTimeout)
         while !CGEventSource.flagsState(.hidSystemState).intersection(held).isEmpty,

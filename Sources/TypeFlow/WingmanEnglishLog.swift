@@ -17,6 +17,9 @@ struct ComposerSend {
     /// Where the text went: Claude (via Warp), the clipboard for use elsewhere,
     /// or nowhere — a ⌘K check whose draft was abandoned without a send or copy.
     var destination: Destination = .claude
+    /// The draft answers a message pasted as context (⌘⇧V). The message itself is
+    /// never logged or sent — only that this was a reply.
+    var reply = false
 
     enum Destination: String, Encodable {
         case claude, clipboard, unsent
@@ -27,9 +30,10 @@ struct ComposerSend {
     /// cross-repo contract:
     ///   `;;tf+ ` the coach wrote the sent text → authorship `corrected`, never analysed
     ///   `;;tf `  typed in TypeFlow, sent as written → authorship `assisted`
+    ///   `;;re `  a reply to a message given as context → `mode: "reply"`
     ///   `;;v `   dictated → modality `spoken`
     var marker: String {
-        (corrected ? ";;tf+ " : ";;tf ") + (dictated ? ";;v " : "")
+        (corrected ? ";;tf+ " : ";;tf ") + (reply ? ";;re " : "") + (dictated ? ";;v " : "")
     }
 }
 
@@ -76,9 +80,13 @@ enum WingmanEnglishLog {
         /// `CoachProvider.logID`; a "local:" prefix means an on-device model.
         /// Omitted when unknown (the demo result).
         let coachProvider: String?
+        /// "reply" when the draft answers a pasted message (its idea → the coach's
+        /// reply; `coach.asked` keeps only each question's kind). Omitted otherwise.
+        /// The message itself is never stored.
+        let mode: String?
 
         enum CodingKeys: String, CodingKey {
-            case ts, cwd, kind, sent, destination, modality, authorship, draft, coach
+            case ts, cwd, kind, sent, destination, modality, authorship, draft, coach, mode
             case sentText = "sent_text"
             case coachModel = "coach_model"
             case coachProvider = "coach_provider"
@@ -99,7 +107,8 @@ enum WingmanEnglishLog {
             destination: send.destination,
             modality: send.dictated ? "spoken" : "written",
             draft: send.draft, sentText: send.destination == .unsent ? nil : send.text, coach: coach,
-            coachModel: coach.model, coachProvider: coach.provider.isEmpty ? nil : coach.provider)
+            coachModel: coach.model, coachProvider: coach.provider.isEmpty ? nil : coach.provider,
+            mode: send.reply ? "reply" : nil)
         do {
             let dir = vault.appendingPathComponent("corpus/typeflow", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

@@ -11,11 +11,21 @@ enum TypeFlowMain {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var composer: ComposerWindow!
     var watcher: ProcessWatcher!
     var hotKey: HotKey!
+    var correctKey: HotKey!
+    var quickFixKey: HotKey!
+    var translateKey: HotKey!
+    var translateTap: DoubleTap!
+    var readKey: HotKey!
+    /// ⌥⌘R's player, with its own voice so it never cuts off the card's or the composer's ▶.
+    let reader = ReadAloudPanel()
+    let services = ServiceProvider()
+    let card = SelectionCard()
     var statusItem: NSStatusItem!
+    private var cutItem: NSMenuItem!
 
     func applicationWillTerminate(_ notification: Notification) {
         composer.flushUnsentChecks()
@@ -32,8 +42,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshStatus(sessions: sessions)
         }
         watcher.start()
-        if ProcessInfo.processInfo.environment["TYPEFLOW_DEMO_COACH"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.composer.showDemoCoach() }
+        ScreenText.warmUp() // so the first pasted screenshot doesn't wait ~65 s
+        Translator.warmUp() // the first translation is 2–3 s cold
+        if let demo = ProcessInfo.processInfo.environment["TYPEFLOW_DEMO_COACH"], demo == "1" || demo == "reply" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.composer.showDemoCoach(reply: demo == "reply")
+            }
         }
 
         // Poll fast only while the composer is open; idle slowly otherwise.
@@ -43,6 +57,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Option+Space (⌥Space)
         hotKey = HotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) { [weak self] in
             self?.toggleComposer()
+        }
+
+        // Right-click → Correct / Translate with TypeFlow (Services), plus
+        // hotkeys for apps without Services (Warp, most Electron apps). The
+        // hotkeys fall back to the clipboard when nothing selected can be read.
+        services.onCorrect = { [weak self] text in
+            // The app waits for this call to return before it takes any key.
+            DispatchQueue.main.async {
+                if SelectedText.cutWhenCorrecting { SelectedText.cutFromFrontApp() }
+                self?.composer.correctSelection(text)
+            }
+        }
+        services.onTranslate = { [weak self] text in self?.card.show(translating: text, near: SelectedText.bounds()) }
+        NSApp.servicesProvider = services
+        NSUpdateDynamicServices()
+        correctKey = HotKey(keyCode: UInt32(kVK_ANSI_E), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.withSelection(cut: SelectedText.cutWhenCorrecting) { self?.composer.correctSelection($0.text) }
+        }
+        // ⌥⌘K: the correction in place, no composer — for quick chat replies.
+        quickFixKey = HotKey(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.withSelection { grab in
+                self?.card.show(correcting: grab.text, near: grab.fromClipboard ? nil : SelectedText.bounds(),
+                                replaceIn: grab.app)
+            }
+        }
+        translateKey = HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.withSelection { self?.translate($0) }
+        }
+        // ⌥ ⌥: the one-finger way to translate, for frequent use.
+        translateTap = DoubleTap(.option) { [weak self] in
+            self?.withSelection { self?.translate($0) }
+        }
+        // ⌥⌘R: just hear it, no translation — a small player (ReadAloudPanel); again stops.
+        readKey = HotKey(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            guard let self else { return }
+            if self.reader.isReading { return self.reader.stop() }
+            self.withSelection { self.reader.read($0.text, from: $0.app) }
         }
 
         installMainMenu()
@@ -110,6 +161,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Open Composer  ⌥Space",
                      action: #selector(toggleComposer),
                      keyEquivalent: "").target = self
+        for line in ["Select or copy text, then:", "   ⌥⌘E  correct in the composer",
+                     "   ⌥⌘K  quick fix in place", "   ⌥ ⌥ or ⌥⌘T  translate", "   ⌥⌘R  read aloud"] {
+            menu.addItem(withTitle: line, action: nil, keyEquivalent: "").isEnabled = false
+        }
+        cutItem = menu.addItem(withTitle: "Cut the selection when correcting",
+                               action: #selector(cutToggled), keyEquivalent: "")
+        cutItem.target = self
+        cutItem.toolTip = "⌥⌘E removes the selected text from its app (the original stays on the clipboard), so the correction pastes in its place"
+        menu.delegate = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit TypeFlow",
                      action: #selector(NSApp.terminate(_:)),
@@ -122,6 +182,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ComposerWindow.show / followTick), so just refresh the list here.
         refreshStatus(sessions: watcher.sessions)
         composer.toggle()
+    }
+
+    @objc private func cutToggled() {
+        SelectedText.cutWhenCorrecting.toggle()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        cutItem.state = SelectedText.cutWhenCorrecting ? .on : .off // the ⋯ menu toggles it too
+    }
+
+    /// The front app's selection (else the clipboard), for the selection hotkeys;
+    /// a beep when there's no text.
+    private func withSelection(cut: Bool = false, _ use: @escaping (SelectedText.Grab) -> Void) {
+        // Let the hotkey's key-up land first, so the ⌘C fallback isn't mixed with it.
+        DispatchQueue.main.async {
+            let grabbed = SelectedText.grab(cut: cut)
+            if ProcessInfo.processInfo.environment["TYPEFLOW_DEBUG"] == "1" {
+                fputs("TypeFlow: selection hotkey in \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"), got \(grabbed?.text.count ?? -1) chars\(grabbed?.fromClipboard == true ? " from the clipboard" : "")\n", stderr)
+            }
+            guard let grabbed,
+                  !grabbed.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { NSSound.beep(); return }
+            use(grabbed)
+        }
+    }
+
+    private func translate(_ grab: SelectedText.Grab) {
+        card.show(translating: grab.text, near: grab.fromClipboard ? nil : SelectedText.bounds())
     }
 
     private func refreshStatus(sessions: [ClaudeSession], targetPID: pid_t? = nil) {

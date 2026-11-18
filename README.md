@@ -31,6 +31,7 @@ Terminal emulators don't use `NSTextView`, so they bypass Apple's entire writing
 - **Apple text intelligence in the composer** — autocorrect, continuous spellcheck, grammar, text replacement, Writing Tools. Smart quotes/dashes are **off** on purpose so `"strings"` and `--flags` in your prompts aren't mangled.
 - **Inline word completion** — finishes the word you're typing (`becom` → `become`) as gray ghost text via the system dictionary: instant, local, English + Spanish auto-detected. **Tab** accepts.
 - **Contraction autocorrect** — `dont` → `don't`, `im` → `I'm`, lone `i` → `I`, on word boundary. A small curated map, so code tokens aren't touched.
+- **Sentence starts capitalized** — `give me` → `Give me`, `done. it works` → `done. It works`, and `i'm` / `i've` / `i'll` / `i'd` → `I'm`…, once the word is typed. Only a plain lowercase word, so `--force`, `readme.md` or `iOS` stay as typed; not after `e.g.`, `etc.`, `...` or `:`; ⌘Z undoes it.
 - **⌘K English coach** — checks the draft before you send: grammar and usage feedback with a one-click corrected version (tracked as editable colored changes), run through **your own** `claude` / `codex` CLI. Optional — everything else works without it.
 - **Apple dictation** — a mic button (or your system dictation shortcut) dictates straight into the composer.
 - **Keep-open mode** (default on) — Enter sends but leaves the composer open for rapid multi-send.
@@ -103,7 +104,7 @@ The composer follows the focused Warp tab by reading its window title via the Ac
 | `ComposerWindow.swift` | The floating composer, footer, keyboard handling, Warp tab-follow + per-session drafts |
 | `GhostTextView.swift` | Draws the gray inline suggestion (kept out of the text buffer) |
 | `WordCompleter.swift` | Current-word completion via `NSSpellChecker` |
-| `ContractionCorrector.swift` | Apostrophe fixes (`dont`→`don't`) + `i`→`I` |
+| `ContractionCorrector.swift` | Apostrophe fixes (`dont`→`don't`) + `i`→`I`, and sentence starts / `i'm` capitalized |
 | `GhostCompleter.swift` | **Dormant** — on-device Foundation Models phrase completion |
 | `WarpInjector.swift` | The send path — keystroke synthesis into Warp's Rich Input |
 | `WarpInspector.swift` | Reads Warp's focused-window title for session-following |

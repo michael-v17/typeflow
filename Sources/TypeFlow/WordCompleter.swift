@@ -12,20 +12,23 @@ final class WordCompleter {
     private let tag = NSSpellChecker.uniqueSpellDocumentTag()
     /// Don't suggest until the partial word is at least this many letters.
     private let minPartial = 2
-    /// Pinned English identifier — the composer is English-only by design. Chosen
-    /// from what this machine's spell checker actually offers.
-    private let language: String
+    /// Pinned spell-checker identifier, chosen from what this machine offers.
+    private var language: String
 
     init() {
-        let available = checker.availableLanguages
-        language = available.first(where: { $0 == "en_US" })
-            ?? available.first(where: { $0.hasPrefix("en") })
-            ?? "en"
-        // English-only: turn OFF auto-detection. Otherwise Spanish candidates
-        // (and Spanish autocorrect) bleed into an English-only terminal. Because
-        // the composer's autocorrect / spellcheck share NSSpellChecker.shared,
-        // this also pins those to English.
+        language = DraftLanguage.english.spellLanguage
+        // Auto-detection OFF: macOS's own per-word guess let Spanish candidates
+        // (and Spanish autocorrect) bleed into English prompts. The composer picks
+        // the language per draft instead (`DraftLanguage`). Because its autocorrect
+        // and spellcheck share NSSpellChecker.shared, this pins those too.
         checker.automaticallyIdentifiesLanguages = false
+        checker.setLanguage(language)
+    }
+
+    /// Switch the shared checker — and with it the composer's autocorrect and
+    /// spellcheck — to the draft's language.
+    func setLanguage(_ draft: DraftLanguage) {
+        language = draft.spellLanguage
         checker.setLanguage(language)
     }
 
