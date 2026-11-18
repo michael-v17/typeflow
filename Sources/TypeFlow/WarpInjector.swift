@@ -70,9 +70,9 @@ enum WarpInjector {
         return AXIsProcessTrustedWithOptions(opts)
     }
 
-    /// `marker` is prepended to the pasted text (see `ComposerSend.marker`) — the
-    /// provenance prefixes wingman-english's capture hook reads.
-    static func send(_ text: String, autoSubmit: Bool = true, marker: String = "") throws {
+    /// `text` is pasted as is — any provenance prefix is already in it
+    /// (`ComposerSend.payload()`).
+    static func send(_ text: String, autoSubmit: Bool = true) throws {
         guard checkAccessibility(prompt: true) else {
             throw InjectError.noAccessibilityPermission
         }
@@ -102,7 +102,7 @@ enum WarpInjector {
         let pb = NSPasteboard.general
         let savedString = pb.string(forType: .string)
         pb.clearContents()
-        pb.setString(marker + text, forType: .string)
+        pb.setString(text, forType: .string)
 
         // 3. ⌃G — open Rich Input.
         sendKey(keyCode: UInt16(kVK_ANSI_G), modifiers: .maskControl, to: warp)

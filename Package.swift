@@ -19,6 +19,11 @@ let package = Package(
                 .linkedFramework("Vision"),
                 .linkedFramework("Translation"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "TypeFlowTests",
+            dependencies: ["TypeFlow"],
+            path: "Tests/TypeFlowTests"
+        ),
     ]
 )

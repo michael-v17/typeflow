@@ -2130,6 +2130,8 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
                tip: "Off: ↵ copies the text to paste anywhere; nothing goes to Warp")
         toggle("Cut the selection when correcting  (⌥⌘E)", SelectedText.cutWhenCorrecting, #selector(cutToggled),
                tip: "The selected text leaves its app (the original stays on the clipboard), so the correction pastes in its place")
+        toggle(SendTags.title, SendTags.isOn(), #selector(sendTagsToggled),
+               tip: "Starts each prompt sent to Warp with a short tag (;;tf, ;;tf+, ;;re, ;;v) that a learning-log hook reads. Off: the text goes as written")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Shortcuts", action: nil, keyEquivalent: "").isEnabled = false
         for line in ["⌘K\tcheck English / suggest reply", "⇧↵\tnewline", "⌥↵\tsend as typed",
@@ -2154,6 +2156,10 @@ final class ComposerWindow: NSWindow, NSMenuDelegate {
 
     @objc private func cutToggled() {
         SelectedText.cutWhenCorrecting.toggle()
+    }
+
+    @objc private func sendTagsToggled() {
+        SendTags.set(!SendTags.isOn())
     }
 
     @objc private func allDesktopsToggled() {

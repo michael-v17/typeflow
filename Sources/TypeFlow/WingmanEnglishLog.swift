@@ -35,6 +35,30 @@ struct ComposerSend {
     var marker: String {
         (corrected ? ";;tf+ " : ";;tf ") + (reply ? ";;re " : "") + (dictated ? ";;v " : "")
     }
+
+    /// What is pasted into Warp: `text`, prefixed with `marker` only when the
+    /// "Tag sends for the learning log" setting is on (off by default, so a
+    /// public install sends exactly what the user wrote).
+    func payload(tagging: Bool = SendTags.isOn()) -> String {
+        tagging ? marker + text : text
+    }
+}
+
+/// The "Tag sends for the learning log" setting: whether sends to Warp carry the
+/// provenance prefixes (`ComposerSend.marker`). Off unless set — only someone
+/// running wingman-english's capture hook needs them. Turn on with the ⋯ menu or
+/// `defaults write <TypeFlow's bundle id> TypeFlowTagSends -bool true`.
+enum SendTags {
+    static let defaultsKey = "TypeFlowTagSends"
+    static let title = "Tag sends for the learning log"
+
+    static func isOn(_ defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: defaultsKey) // false when unset
+    }
+
+    static func set(_ on: Bool, _ defaults: UserDefaults = .standard) {
+        defaults.set(on, forKey: defaultsKey)
+    }
 }
 
 /// Writes the evidence the capture hook can't see: for every send or copy the
